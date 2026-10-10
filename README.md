@@ -7,11 +7,11 @@ An interactive, color-changing Princess Aurora Halloween dress using an ESP32 mi
 ## 1. Hardware Architecture & Wiring
 
 ### Microcontroller & Components
-* **MCU**: Seeed Studio XIAO ESP32-C3 (160MHz single-core RISC-V, 4MB Flash, 400KB SRAM).
-* **LEDs**: 150 WS2812B addressable LEDs split across 3 data pins:
-  - Skirt: 100 LEDs on GPIO 4 (D2)
-  - Left Sleeve: 25 LEDs on GPIO 5 (D3)
-  - Right Sleeve: 25 LEDs on GPIO 6 (D4)
+* **MCU**: Seeed Studio XIAO ESP32-C3 (160MHz single-core RISC-V, 4MB Flash, 320KB SRAM).
+* **LEDs**: 150 WS2812B addressable LEDs driven by `makuna/NeoPixelBus @ ^2.8.4` over dedicated hardware RMT channels:
+  - Skirt: 100 LEDs on GPIO 4 (D2, RMT Channel 0)
+  - Upper Body & Sleeves: 50 LEDs on GPIO 5 (D3, RMT Channel 1)
+  - GPIO 6 (D4): Permanently disabled (ESP32-C3 has strictly 2 RMT TX channels)
 * **Sensors**: Dual 38KHz Digital IR Demodulator Receivers (one on each shoulder for 360° wand target acquisition):
   - Left Shoulder: GPIO 3 (D1)
   - Right Shoulder: GPIO 2 (D0)
@@ -23,9 +23,9 @@ An interactive, color-changing Princess Aurora Halloween dress using an ESP32 mi
 |---|---|---|---|---|
 | **Left Shoulder IR** | GPIO 3 (D1) | 3.3V Input | **Connect to 3.3V Rail** | Internal pull-up enabled |
 | **Right Shoulder IR**| GPIO 2 (D0) | 3.3V Input | **Connect to 3.3V Rail** | Internal pull-up enabled |
-| **Skirt LEDs** | GPIO 4 (D2) | 5V Output (WS2812B) | 5V Battery Rail | 100 LEDs |
-| **Left Sleeve LEDs** | GPIO 5 (D3) | 5V Output (WS2812B) | 5V Battery Rail | 25 LEDs |
-| **Right Sleeve LEDs**| GPIO 6 (D4) | 5V Output (WS2812B) | 5V Battery Rail | 25 LEDs |
+| **Skirt LEDs** | GPIO 4 (D2) | 5V Output (WS2812B) | 5V Battery Rail | 100 LEDs (RMT 0) |
+| **Upper Body LEDs** | GPIO 5 (D3) | 5V Output (WS2812B) | 5V Battery Rail | 50 LEDs (RMT 1) |
+| **GPIO 6 (Disabled)**| GPIO 6 (D4) | N/A | N/A | Disabled (ESP32-C3 limit: 2 RMT TX channels) |
 
 > [!IMPORTANT]
 > **IR Receiver Operating Voltage (3.3V vs. 5V)**:
@@ -90,14 +90,14 @@ MagiQuest wands (Creative Kingdoms / Great Wolf Lodge) emit active 38KHz pulse-w
 
 * **`include/Config.h`**: Central definitions for hardware pins, LED counts, brightness limits (1500mA brownout protection cap), animation timing, and soft AP credentials.
 * **`StorageController`**: Persistent non-volatile storage (NVS via ESP32 `Preferences`) for 32-bit wand IDs (`pinkWandCode` and `blueWandCode`).
-* **`LedController`**: FastLED driver across 3 pins (Skirt, Left Sleeve, Right Sleeve) implementing non-blocking 40 FPS updates:
-  - `PINK`: Solid Princess Aurora Pink (`0xFF1493`).
-  - `BLUE`: Solid Fairy Merryweather Blue (`0x0078FF`).
-  - `SPLOTCHES`: Procedural Perlin-noise 3D color duel animation with turbulent advection, clash boundary sparkle, and dueling wave oscillation.
+* **`LedController`**: Hardware RMT `NeoPixelBus` driver on GPIO 4 and GPIO 5 with early power-on pin clamp (preventing solid white lockup) and standalone procedural animations (`AnimMath.h`):
+  - `PINK`: Solid Princess Aurora Pink (`#FF1493`).
+  - `BLUE`: Solid Fairy Merryweather Blue (`#0078FF`).
+  - `SPLOTCHES`: Procedural noise color duel animation with turbulent advection, clash boundary sparkle (`#FFFFF0`), and dueling wave oscillation.
   - `OFF`: Low-power blank state.
-  - Pairing feedback breathing pulses.
-* **`IRController`**: Dual-receiver driver on Left/Right shoulders with ping-pong buffering, 3.5ms burst separation, custom 56-bit MagiQuest decoder, and pairing state machine.
-* **`WebController`**: Standalone WiFi Access Point (`"Sleeping-Beauty-Dress"`) and DNS captive portal serving an asynchronous mobile web interface on port 80.
+  - `PAIRING_FEEDBACK`: Visual breathing pulses.
+* **`IRController`**: Dual-receiver driver on Left/Right shoulders with `IRAM_ATTR` interrupt safety, cache-safe `esp_timer_get_time()`, ping-pong buffering, 3.5ms burst separation, custom 56-bit MagiQuest decoder, and pairing state machine.
+* **`WebController`**: Standalone WiFi Access Point (`"Sleeping-Beauty-Dress"` @ `192.168.4.1`) and DNS captive portal serving an asynchronous mobile web interface on port 80 with REST endpoints.
 
 ---
 
