@@ -8,6 +8,7 @@ void StorageController::init() {
 }
 
 void StorageController::savePinkWandCode(uint32_t code) {
+    if (getPinkWandCode() == code) return;
     preferences.putUInt("pink_wand", code);
 }
 
@@ -16,6 +17,7 @@ uint32_t StorageController::getPinkWandCode() {
 }
 
 void StorageController::saveBlueWandCode(uint32_t code) {
+    if (getBlueWandCode() == code) return;
     preferences.putUInt("blue_wand", code);
 }
 
