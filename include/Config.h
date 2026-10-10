@@ -2,75 +2,70 @@
 #define CONFIG_H
 
 #include <stdint.h>
-#include <driver/rmt.h>
-
 // ============================================================================
 // Hardware Pin Definitions (Seeed Studio XIAO ESP32-C3)
 // ============================================================================
 // GPIO 3 (D1 / A1): Digital input for Left Shoulder 38KHz IR receiver (VCC -> 3.3V)
 // GPIO 2 (D0 / A0): Digital input for Right Shoulder 38KHz IR receiver (VCC -> 3.3V)
-// NOTE: Power IR receivers from 3.3V rail (NOT 5V) to prevent ESD diode clamping & pulse distortion.
-// GPIO 4 (D2 / A2): FastLED data line for Skirt (100 LEDs)
-// GPIO 5 (D3 / A3): FastLED data line for Left Sleeve (25 LEDs)
-// GPIO 6 (D4):      FastLED data line for Right Sleeve (25 LEDs)
+// GPIO 4 (D2 / A2): NeoPixelBus data line for Skirt (100 LEDs, RMT Channel 0)
+// GPIO 5 (D3 / A3): NeoPixelBus data line for Upper Body & Sleeves (50 LEDs, RMT Channel 1)
+// GPIO 6 (D4):      Permanently DISABLED (ESP32-C3 has strictly 2 RMT TX channels: 0 and 1)
 #define PIN_IR_RECV_LEFT   3  // Left Shoulder IR Receiver (GPIO 3 / D1)
 #define PIN_IR_RECV_RIGHT  2  // Right Shoulder IR Receiver (GPIO 2 / D0)
 #define PIN_IR_RECV        PIN_IR_RECV_LEFT  // Compatibility alias
 
-// ============================================================================
-// Hardware RMT (Remote Control Transceiver) Configuration
-// ============================================================================
-// Channel assignments tailored for target MCU:
-// - ESP32-C3: 4 total channels (0-1 TX, 2-3 RX) -> Left: Ch 2, Right: Ch 3
-// - ESP32-S3: 8 total channels (0-3 TX, 4-7 RX) -> Left: Ch 4, Right: Ch 5
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-  #define RMT_RX_CHANNEL_LEFT   RMT_CHANNEL_4
-  #define RMT_RX_CHANNEL_RIGHT  RMT_CHANNEL_5
-#elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  #define RMT_RX_CHANNEL_LEFT   RMT_CHANNEL_2
-  #define RMT_RX_CHANNEL_RIGHT  RMT_CHANNEL_3
-#else
-  #define RMT_RX_CHANNEL_LEFT   RMT_CHANNEL_0
-  #define RMT_RX_CHANNEL_RIGHT  RMT_CHANNEL_1
-#endif
-
-// RMT clock divider: 80MHz APB clock / 80 = 1MHz -> 1 tick = 1 microsecond (us)
-#define RMT_CLK_DIV               80
-// Silicon hardware filter: ignore noise spikes shorter than 80us
-#define RMT_FILTER_TICKS_THRESH   80
-// Silicon hardware idle threshold: 3500us of silence terminates RX burst
-#define RMT_IDLE_THRESHOLD_TICKS  3500
-// Ringbuffer capacity per channel in bytes (holds multiple complete frames)
-#define RMT_RING_BUF_SIZE         1024
-
-#define PIN_LED_SKIRT   4
-#define PIN_LED_LSLEEVE 5
-#define PIN_LED_RSLEEVE 6
+#define PIN_LED_SKIRT            4  // Phase 1 Skirt (100 LEDs, RMT Channel 0)
+#define PIN_LED_UPPER            5  // Phase 2 Upper Body & Sleeves (50 LEDs, RMT Channel 1)
+#define PIN_LED_LSLEEVE          PIN_LED_UPPER // Compatibility alias
+#define PIN_LED_RSLEEVE          6  // Disabled permanently (ESP32-C3 has only 2 RMT TX channels)
+#define PIN_LED_RSLEEVE_DISABLED 6  // Compatibility alias
 
 // ============================================================================
 // LED Geometry Configuration
 // ============================================================================
 #define NUM_LEDS_SKIRT   100
-#define NUM_LEDS_LSLEEVE 25
-#define NUM_LEDS_RSLEEVE 25
+#define NUM_LEDS_UPPER   50
+#define NUM_LEDS_LSLEEVE 25  // Compatibility alias
+#define NUM_LEDS_RSLEEVE 25  // Compatibility alias
 #define NUM_LEDS_TOTAL   150
 
 // Buffer slice offsets within master buffer
 #define OFFSET_LED_SKIRT   0
-#define OFFSET_LED_LSLEEVE (NUM_LEDS_SKIRT)                    // 100
-#define OFFSET_LED_RSLEEVE (NUM_LEDS_SKIRT + NUM_LEDS_LSLEEVE) // 125
+#define OFFSET_LED_UPPER   (NUM_LEDS_SKIRT)                     // 100
+#define OFFSET_LED_LSLEEVE (OFFSET_LED_UPPER)                  // Compatibility alias
+#define OFFSET_LED_RSLEEVE (NUM_LEDS_SKIRT + NUM_LEDS_LSLEEVE) // Compatibility alias
 
 // ============================================================================
-// FastLED Setup & Power Management
+// Princess Aurora & Merryweather Color Constants
+// ============================================================================
+#define COLOR_PINK_HEX    "#FF1493"
+#define COLOR_BLUE_HEX    "#0078FF"
+#define COLOR_SPARKLE_HEX "#FFFFF0"
+#define COLOR_OFF_HEX     "#000000"
+
+#define COLOR_PINK_R    255
+#define COLOR_PINK_G    20
+#define COLOR_PINK_B    147
+
+#define COLOR_BLUE_R    0
+#define COLOR_BLUE_G    120
+#define COLOR_BLUE_B    255
+
+#define COLOR_SPARKLE_R 255
+#define COLOR_SPARKLE_G 255
+#define COLOR_SPARKLE_B 240
+
+// ============================================================================
+// NeoPixelBus Setup & Power Management
 // ============================================================================
 #define LED_CHIPSET            WS2812B
 #define LED_COLOR_ORDER        GRB
 #define LED_DEFAULT_BRIGHTNESS 160   // Baseline brightness (~63% of 255)
+#define LED_MAX_BRIGHTNESS     160   // Safe brightness ceiling
 #define LED_MAX_VOLTS          5     // 5V WS2812B power rail
 #define LED_MAX_MILLIAMPS      1500  // Maximum current cap to prevent battery brownout
 
 // Compatibility aliases
-#define LED_MAX_BRIGHTNESS      LED_DEFAULT_BRIGHTNESS
 #define LED_POWER_VOLTS         LED_MAX_VOLTS
 #define LED_POWER_MAX_MILLIAMPS LED_MAX_MILLIAMPS
 
@@ -126,3 +121,4 @@
 #define CAPTIVE_PORTAL_PORT DNS_PORT
 
 #endif // CONFIG_H
+

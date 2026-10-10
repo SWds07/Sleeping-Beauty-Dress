@@ -1,17 +1,27 @@
 #include "LedController.h"
 #include "Config.h"
+#include "AnimMath.h"
 #include <atomic>
+#include <driver/gpio.h>
+
+// ============================================================================
+// NeoPixelBus Hardware RMT Driver Instances (ESP32-C3 RMT Channels 0 & 1)
+// ============================================================================
+// Skirt: 100 WS2812B pixels on GPIO 4 using RMT Channel 0
+static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod> s_stripSkirt(NUM_LEDS_SKIRT, PIN_LED_SKIRT);
+
+// Upper Body & Sleeves: 50 WS2812B pixels on GPIO 5 using RMT Channel 1
+static NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt1Ws2812xMethod> s_stripUpper(NUM_LEDS_UPPER, PIN_LED_UPPER);
 
 // ============================================================================
 // Internal Storage & Framebuffers
 // ============================================================================
-// Contiguous master buffer of 150 CRGB pixels in .bss (450 bytes)
-static CRGB s_leds[NUM_LEDS_TOTAL];
+// Unscaled master RGB buffer in .bss (150 pixels = 450 bytes)
+static RgbColor s_unscaledLeds[NUM_LEDS_TOTAL];
 
-// Pointers to the individual dress segment slices
-static CRGB* const s_skirtLeds   = s_leds + OFFSET_LED_SKIRT;
-static CRGB* const s_lsleeveLeds = s_leds + OFFSET_LED_LSLEEVE;
-static CRGB* const s_rsleeveLeds = s_leds + OFFSET_LED_RSLEEVE;
+// Segment slice pointers into master buffer
+static RgbColor* const s_skirtLeds = s_unscaledLeds + OFFSET_LED_SKIRT;
+static RgbColor* const s_upperLeds = s_unscaledLeds + OFFSET_LED_UPPER;
 
 // ============================================================================
 // Thread-Safe State Variables (safe across loopTask and async_tcp task)
@@ -28,45 +38,98 @@ static std::atomic<uint32_t> s_feedbackStartTime{0};
 // Local loop frame timing (accessed exclusively on the main loop thread)
 static uint32_t s_lastFrameTime = 0;
 
+// Persistent hardware state tracking: records what mode is currently rendered on physical LEDs
+static LedMode s_renderedMode = static_cast<LedMode>(255);
+
 // ============================================================================
 // Public Interface Implementation
 // ============================================================================
 
+void LedController::earlyPinClamp() {
+    pinMode(PIN_LED_SKIRT, OUTPUT);
+    digitalWrite(PIN_LED_SKIRT, LOW);
+    gpio_pulldown_en((gpio_num_t)PIN_LED_SKIRT);
+    gpio_pullup_dis((gpio_num_t)PIN_LED_SKIRT);
+
+    pinMode(PIN_LED_UPPER, OUTPUT);
+    digitalWrite(PIN_LED_UPPER, LOW);
+    gpio_pulldown_en((gpio_num_t)PIN_LED_UPPER);
+    gpio_pullup_dis((gpio_num_t)PIN_LED_UPPER);
+
+    delayMicroseconds(400);
+}
+
 void LedController::init() {
-    // 1. Register FastLED controllers for all three hardware pins
-    FastLED.addLeds<LED_CHIPSET, PIN_LED_SKIRT, LED_COLOR_ORDER>(s_skirtLeds, NUM_LEDS_SKIRT);
-    FastLED.addLeds<LED_CHIPSET, PIN_LED_LSLEEVE, LED_COLOR_ORDER>(s_lsleeveLeds, NUM_LEDS_LSLEEVE);
-    FastLED.addLeds<LED_CHIPSET, PIN_LED_RSLEEVE, LED_COLOR_ORDER>(s_rsleeveLeds, NUM_LEDS_RSLEEVE);
+    Serial.println(F("[LedController] Initializing NeoPixelBus hardware RMT drivers..."));
+    earlyPinClamp();
 
-    // 2. Configure power management and baseline brightness
-    FastLED.setMaxPowerInVoltsAndMilliamps(LED_MAX_VOLTS, LED_MAX_MILLIAMPS);
-    FastLED.setBrightness(s_brightness.load(std::memory_order_relaxed));
+    // 1. Initialize NeoPixelBus RMT hardware peripherals
+    s_stripSkirt.Begin();
+    s_stripUpper.Begin();
 
-    // 3. Clear all LEDs to OFF at power-on
-    fill_solid(s_leds, NUM_LEDS_TOTAL, CRGB::Black);
-    FastLED.show();
+    // 2. Synchronous dark clear push before WiFi or IR bringup (guarantees zero-white boot)
+    s_stripSkirt.ClearTo(COLOR_DARK_BLACK);
+    s_stripUpper.ClearTo(COLOR_DARK_BLACK);
+    s_stripSkirt.Show();
+    s_stripUpper.Show();
+
+    while (!s_stripSkirt.CanShow() || !s_stripUpper.CanShow()) {
+        delayMicroseconds(50);
+    }
+    delayMicroseconds(400);
+
+    // 3. Clear master framebuffer
+    for (uint16_t i = 0; i < NUM_LEDS_TOTAL; i++) {
+        s_unscaledLeds[i] = COLOR_DARK_BLACK;
+    }
 
     s_currentMode.store(LedMode::OFF, std::memory_order_release);
-    s_needsRedraw.store(false, std::memory_order_release);
+    s_needsRedraw.store(true, std::memory_order_release);
+    s_renderedMode = static_cast<LedMode>(255);
+    s_lastFrameTime = millis();
+}
+
+void LedController::pushPhysicalFrame() {
+    uint8_t b = s_brightness.load(std::memory_order_relaxed);
+    if (b > LED_MAX_BRIGHTNESS) {
+        b = LED_MAX_BRIGHTNESS;
+    }
+
+    // Lossless integer brightness scaling: (c * brightness) / 255
+    for (uint16_t i = 0; i < NUM_LEDS_SKIRT; i++) {
+        RgbColor c = s_skirtLeds[i];
+        uint8_t r = (uint8_t)(((uint16_t)c.R * b) / 255);
+        uint8_t g = (uint8_t)(((uint16_t)c.G * b) / 255);
+        uint8_t bl = (uint8_t)(((uint16_t)c.B * b) / 255);
+        s_stripSkirt.SetPixelColor(i, RgbColor(r, g, bl));
+    }
+
+    for (uint16_t j = 0; j < NUM_LEDS_UPPER; j++) {
+        RgbColor c = s_upperLeds[j];
+        uint8_t r = (uint8_t)(((uint16_t)c.R * b) / 255);
+        uint8_t g = (uint8_t)(((uint16_t)c.G * b) / 255);
+        uint8_t bl = (uint8_t)(((uint16_t)c.B * b) / 255);
+        s_stripUpper.SetPixelColor(j, RgbColor(r, g, bl));
+    }
+
+    // Non-blocking hardware push via RMT FIFO/DMA
+    if (s_stripSkirt.CanShow() && s_stripUpper.CanShow()) {
+        s_stripSkirt.Show();
+        s_stripUpper.Show();
+    }
 }
 
 void LedController::update() {
     uint32_t now = millis();
 
-    // Non-blocking 40 FPS frame throttling (25ms)
-    if (now - s_lastFrameTime < ANIMATION_FRAME_MS) {
+    // Non-blocking ~40 FPS frame throttling (25ms)
+    if (now - s_lastFrameTime < LED_FRAME_INTERVAL_MS) {
         return;
     }
     s_lastFrameTime = now;
 
     // Check if brightness was updated asynchronously
     bool brightnessChanged = s_brightnessDirty.exchange(false, std::memory_order_acq_rel);
-    if (brightnessChanged) {
-        FastLED.setBrightness(s_brightness.load(std::memory_order_relaxed));
-    }
-
-    // Persistent hardware state tracking: records what is currently displayed on physical LEDs
-    static LedMode s_renderedMode = static_cast<LedMode>(255);
 
     LedMode mode = s_currentMode.load(std::memory_order_acquire);
     bool modeChanged = (mode != s_renderedMode);
@@ -76,59 +139,80 @@ void LedController::update() {
     switch (mode) {
         case LedMode::OFF:
             if (shouldRedraw) {
-                fill_solid(s_leds, NUM_LEDS_TOTAL, CRGB::Black);
-                FastLED.show();
+                Serial.println(F("[LedController] Outputting OFF (Black) to GPIO 4 & 5"));
+                for (uint16_t i = 0; i < NUM_LEDS_TOTAL; i++) {
+                    s_unscaledLeds[i] = COLOR_DARK_BLACK;
+                }
+                pushPhysicalFrame();
                 s_renderedMode = mode;
             }
+            // Bus idling: static frames are not pushed continuously
             break;
 
         case LedMode::PINK:
             if (shouldRedraw) {
-                fill_solid(s_leds, NUM_LEDS_TOTAL, COLOR_AURORA_PINK);
-                FastLED.show();
+                Serial.println(F("[LedController] Outputting PINK to GPIO 4 & 5"));
+                for (uint16_t i = 0; i < NUM_LEDS_TOTAL; i++) {
+                    s_unscaledLeds[i] = COLOR_AURORA_PINK;
+                }
+                pushPhysicalFrame();
                 s_renderedMode = mode;
             }
+            // Bus idling: static frames are not pushed continuously
             break;
 
         case LedMode::BLUE:
             if (shouldRedraw) {
-                fill_solid(s_leds, NUM_LEDS_TOTAL, COLOR_AURORA_BLUE);
-                FastLED.show();
+                Serial.println(F("[LedController] Outputting BLUE to GPIO 4 & 5"));
+                for (uint16_t i = 0; i < NUM_LEDS_TOTAL; i++) {
+                    s_unscaledLeds[i] = COLOR_AURORA_BLUE;
+                }
+                pushPhysicalFrame();
                 s_renderedMode = mode;
             }
+            // Bus idling: static frames are not pushed continuously
             break;
 
         case LedMode::SPLOTCHES:
+            if (modeChanged) {
+                Serial.println(F("[LedController] Running SPLOTCHES animation on GPIO 4 & 5"));
+            }
             renderSplotchesFrame(now);
-            FastLED.show();
+            pushPhysicalFrame();
             s_renderedMode = LedMode::SPLOTCHES;
-            // CRITICALLY: REMOVE s_needsRedraw.store(false) so asynchronous mode triggers are never clobbered!
             break;
 
         case LedMode::PAIRING_FEEDBACK:
+            if (modeChanged) {
+                Serial.println(F("[LedController] Running PAIRING_FEEDBACK animation on GPIO 4 & 5"));
+            }
             renderPairingFeedbackFrame(now);
-            FastLED.show();
+            pushPhysicalFrame();
             s_renderedMode = s_currentMode.load(std::memory_order_acquire);
             break;
     }
 }
 
 void LedController::setPink() {
+    Serial.println(F("[LedController] Mode requested: PINK"));
     s_currentMode.store(LedMode::PINK, std::memory_order_release);
     s_needsRedraw.store(true, std::memory_order_release);
 }
 
 void LedController::setBlue() {
+    Serial.println(F("[LedController] Mode requested: BLUE"));
     s_currentMode.store(LedMode::BLUE, std::memory_order_release);
     s_needsRedraw.store(true, std::memory_order_release);
 }
 
 void LedController::triggerSplotches() {
+    Serial.println(F("[LedController] Mode requested: SPLOTCHES"));
     s_currentMode.store(LedMode::SPLOTCHES, std::memory_order_release);
     s_needsRedraw.store(true, std::memory_order_release);
 }
 
 void LedController::setOff() {
+    Serial.println(F("[LedController] Mode requested: OFF"));
     s_currentMode.store(LedMode::OFF, std::memory_order_release);
     s_needsRedraw.store(true, std::memory_order_release);
 }
@@ -140,8 +224,26 @@ void LedController::showPairingFeedback(bool isPink) {
     s_needsRedraw.store(true, std::memory_order_release);
 }
 
+void LedController::triggerPairingFeedback(bool isPink) {
+    showPairingFeedback(isPink);
+}
+
+void LedController::setMode(LedMode mode) {
+    switch (mode) {
+        case LedMode::OFF:              setOff(); break;
+        case LedMode::PINK:             setPink(); break;
+        case LedMode::BLUE:             setBlue(); break;
+        case LedMode::SPLOTCHES:        triggerSplotches(); break;
+        case LedMode::PAIRING_FEEDBACK: showPairingFeedback(true); break;
+    }
+}
+
 LedMode LedController::getCurrentMode() {
     return s_currentMode.load(std::memory_order_acquire);
+}
+
+LedMode LedController::getMode() {
+    return getCurrentMode();
 }
 
 const char* LedController::getModeString() {
@@ -171,7 +273,7 @@ uint8_t LedController::getBrightness() {
 // Internal Rendering Implementations
 // ============================================================================
 
-CRGB LedController::computeSplotchColor(uint8_t noise, uint8_t duelThreshold) {
+RgbColor LedController::computeSplotchColor(uint8_t noise, uint8_t duelThreshold) {
     int16_t diff = (int16_t)noise - (int16_t)duelThreshold;
 
     // Pure Aurora Pink territory (Flora dominant)
@@ -195,14 +297,14 @@ CRGB LedController::computeSplotchColor(uint8_t noise, uint8_t duelThreshold) {
     uint8_t t = (uint8_t)(((diff + SPLOTCH_BOUNDARY_WIDTH) * 255) / (2 * SPLOTCH_BOUNDARY_WIDTH));
 
     // 2. Base blend passing through magical iridescent violet
-    CRGB color = blend(COLOR_AURORA_BLUE, COLOR_AURORA_PINK, t);
+    RgbColor color = blend(COLOR_AURORA_BLUE, COLOR_AURORA_PINK, t);
 
     // 3. Add spell clash highlight energy (peaks at center of clash)
     int16_t absDiff = abs(diff);
     uint8_t clashGlow = (uint8_t)(((SPLOTCH_BOUNDARY_WIDTH - absDiff) * 60) / SPLOTCH_BOUNDARY_WIDTH);
-    color.r = qadd8(color.r, clashGlow);
-    color.g = qadd8(color.g, clashGlow);
-    color.b = qadd8(color.b, clashGlow);
+    color.R = qadd8(color.R, clashGlow);
+    color.G = qadd8(color.G, clashGlow);
+    color.B = qadd8(color.B, clashGlow);
 
     // 4. Boundary sparkles (higher probability at active spell collision)
     if (random8() < (SPLOTCH_SPARKLE_CHANCE * 3)) {
@@ -230,20 +332,12 @@ void LedController::renderSplotchesFrame(uint32_t now) {
         s_skirtLeds[i] = computeSplotchColor(noise, duelThreshold);
     }
 
-    // 2. Left Sleeve (25 LEDs on PIN_LED_LSLEEVE) - Y=2000, counter-drift
-    for (uint16_t j = 0; j < NUM_LEDS_LSLEEVE; j++) {
+    // 2. Upper Body & Sleeves (50 LEDs on PIN_LED_UPPER)
+    for (uint16_t j = 0; j < NUM_LEDS_UPPER; j++) {
         uint16_t x = (uint16_t)(j * SPLOTCH_SLEEVE_SCALE) - (s_driftX >> 1);
         uint16_t y = 2000;
         uint8_t noise = inoise8(x, y, s_timeZ);
-        s_lsleeveLeds[j] = computeSplotchColor(noise, duelThreshold);
-    }
-
-    // 3. Right Sleeve (25 LEDs on PIN_LED_RSLEEVE) - Y=4000, forward drift
-    for (uint16_t k = 0; k < NUM_LEDS_RSLEEVE; k++) {
-        uint16_t x = (uint16_t)(k * SPLOTCH_SLEEVE_SCALE) + (s_driftX >> 1);
-        uint16_t y = 4000;
-        uint8_t noise = inoise8(x, y, s_timeZ);
-        s_rsleeveLeds[k] = computeSplotchColor(noise, duelThreshold);
+        s_upperLeds[j] = computeSplotchColor(noise, duelThreshold);
     }
 }
 
@@ -257,7 +351,11 @@ void LedController::renderPairingFeedbackFrame(uint32_t now) {
         bool isPink = s_feedbackIsPink.load(std::memory_order_relaxed);
         LedMode nextMode = isPink ? LedMode::PINK : LedMode::BLUE;
         s_currentMode.store(nextMode, std::memory_order_release);
-        fill_solid(s_leds, NUM_LEDS_TOTAL, isPink ? COLOR_AURORA_PINK : COLOR_AURORA_BLUE);
+        RgbColor finalColor = isPink ? COLOR_AURORA_PINK : COLOR_AURORA_BLUE;
+        for (uint16_t i = 0; i < NUM_LEDS_TOTAL; i++) {
+            s_unscaledLeds[i] = finalColor;
+        }
+        s_needsRedraw.store(true, std::memory_order_release);
         return;
     }
 
@@ -267,18 +365,24 @@ void LedController::renderPairingFeedbackFrame(uint32_t now) {
     uint8_t wave = sin8(phase);
 
     bool isPink = s_feedbackIsPink.load(std::memory_order_relaxed);
-    CRGB baseColor = isPink ? COLOR_AURORA_PINK : COLOR_AURORA_BLUE;
-    CRGB pulseColor = baseColor;
-    pulseColor.nscale8_video(wave);
+    RgbColor baseColor = isPink ? COLOR_AURORA_PINK : COLOR_AURORA_BLUE;
+    RgbColor pulseColor(
+        (uint8_t)(((uint16_t)baseColor.R * wave) / 255),
+        (uint8_t)(((uint16_t)baseColor.G * wave) / 255),
+        (uint8_t)(((uint16_t)baseColor.B * wave) / 255)
+    );
 
-    fill_solid(s_skirtLeds, NUM_LEDS_SKIRT, pulseColor);
-    fill_solid(s_lsleeveLeds, NUM_LEDS_LSLEEVE, pulseColor);
-    fill_solid(s_rsleeveLeds, NUM_LEDS_RSLEEVE, pulseColor);
+    for (uint16_t i = 0; i < NUM_LEDS_TOTAL; i++) {
+        s_unscaledLeds[i] = pulseColor;
+    }
 
     // Sprinkle subtle pixie dust sparkles during pulse peaks
     if (wave > 180) {
-        if (random8() < 20) s_skirtLeds[random8(NUM_LEDS_SKIRT)] = COLOR_SPELL_SPARKLE;
-        if (random8() < 10) s_lsleeveLeds[random8(NUM_LEDS_LSLEEVE)] = COLOR_SPELL_SPARKLE;
-        if (random8() < 10) s_rsleeveLeds[random8(NUM_LEDS_RSLEEVE)] = COLOR_SPELL_SPARKLE;
+        if (random8() < 20) {
+            s_skirtLeds[random8(NUM_LEDS_SKIRT)] = COLOR_SPELL_SPARKLE;
+        }
+        if (random8() < 20) {
+            s_upperLeds[random8(NUM_LEDS_UPPER)] = COLOR_SPELL_SPARKLE;
+        }
     }
 }
