@@ -2,70 +2,103 @@
 #include "Config.h"
 #include "LedController.h"
 #include "StorageController.h"
-#include <driver/rmt.h>
+#include <esp_timer.h>
 #include <atomic>
 
 // ============================================================================
 // Capture Buffer & Hardware Timing Constants
 // ============================================================================
-static const uint16_t IR_BUF_SIZE    = 180;
-static const uint16_t IR_RAW_TICK_US = 1; // RMT clock divided to 1us per tick
+// Each 56-bit MagiQuest frame consists of 112 transitions (56 marks + 56 spaces).
+// 160 entries provides ample headroom for leading/trailing noise or jitter.
+static const uint16_t IR_BUF_SIZE           = 160;
+// Inter-packet silence timeout: 3500us (3.5ms).
+// Intra-packet spaces are <= 1000us; inter-burst gaps are >= 10ms.
+// 3.5ms cleanly isolates bursts and delivers instantaneous response.
+static const uint32_t IR_SILENCE_TIMEOUT_US = 3500;
+static const uint16_t IR_RAW_TICK_US        = 2;    // 2us resolution per sample unit
 
 // ============================================================================
-// Hardware RMT IR Receiver Channel
+// Dual-Buffered IR Receiver Channel
 // ============================================================================
+// Using ping-pong buffers prevents incoming repeat bursts from overwriting
+// or corrupting the packet currently being read/decoded by the main loop.
 struct IRChannel {
-    const char*     name;
-    uint8_t         pin;
-    rmt_channel_t   rmtChannel;
-    RingbufHandle_t ringbuf;
-    bool            initialized;
+    const char*       name;
+    uint8_t           pin;
+    volatile uint16_t rawbuf[2][IR_BUF_SIZE];
+    volatile uint16_t rawlen[2];
+    volatile uint8_t  activeBuf;   // Buffer currently written by ISR (0 or 1)
+    volatile uint8_t  readyBuf;    // Buffer ready for decoding (0, 1, or 255 if none)
+    volatile uint32_t lastEdgeUs;
+    volatile bool     capturing;
+
+    void IRAM_ATTR handleEdge() {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+        if (!capturing) {
+            capturing   = true;
+            uint8_t b   = activeBuf;
+            rawlen[b]   = 1;
+            rawbuf[b][0]= 1; // Dummy entry at offset 0
+            lastEdgeUs  = now;
+        } else {
+            uint32_t delta = now - lastEdgeUs;
+            lastEdgeUs     = now;
+            uint8_t b      = activeBuf;
+
+            // Check if delta indicates an inter-packet gap (>= 3.5ms silence)
+            if (delta >= IR_SILENCE_TIMEOUT_US) {
+                // The previous burst finished before this new edge arrived
+                if (rawlen[b] >= 100) {
+                    readyBuf  = b;
+                    activeBuf = 1 - b;
+                    b         = activeBuf;
+                }
+                // Start capturing the new incoming packet
+                rawlen[b]    = 1;
+                rawbuf[b][0] = 1;
+                capturing    = true;
+                return;
+            }
+
+            if (rawlen[b] < (IR_BUF_SIZE - 1)) {
+                rawbuf[b][rawlen[b]++] = static_cast<uint16_t>(delta / IR_RAW_TICK_US);
+            }
+        }
+    }
+
+    void checkTimeout(uint32_t nowUs) {
+        // Fast lock-free pre-check: avoid interrupt disabling if not timed out
+        if (!capturing || (nowUs - lastEdgeUs < IR_SILENCE_TIMEOUT_US)) {
+            return;
+        }
+
+        // Micro-critical section (<30ns): eliminate race condition with handleEdge() ISR
+        noInterrupts();
+        if (capturing && (nowUs - lastEdgeUs >= IR_SILENCE_TIMEOUT_US)) {
+            capturing = false;
+            uint8_t b = activeBuf;
+            if (rawlen[b] >= 100) {
+                readyBuf          = b;
+                activeBuf         = 1 - b;
+                rawlen[activeBuf] = 0;
+            } else {
+                rawlen[b] = 0;
+            }
+        }
+        interrupts();
+    }
 };
 
-static IRChannel s_channelLeft  = { "Left Shoulder",  PIN_IR_RECV_LEFT,  RMT_RX_CHANNEL_LEFT,  nullptr, false };
-static IRChannel s_channelRight = { "Right Shoulder", PIN_IR_RECV_RIGHT, RMT_RX_CHANNEL_RIGHT, nullptr, false };
+static IRChannel s_channelLeft  = { "Left Shoulder",  PIN_IR_RECV_LEFT,  {{0}}, {0, 0}, 0, 255, 0, false };
+static IRChannel s_channelRight = { "Right Shoulder", PIN_IR_RECV_RIGHT, {{0}}, {0, 0}, 0, 255, 0, false };
 
-static bool initRMTChannel(IRChannel& channel) {
-    rmt_config_t config;
-    config.rmt_mode                      = RMT_MODE_RX;
-    config.channel                       = channel.rmtChannel;
-    config.gpio_num                      = static_cast<gpio_num_t>(channel.pin);
-    config.clk_div                       = RMT_CLK_DIV;
-    config.mem_block_num                 = 1;
-    config.rx_config.filter_en           = true;
-    config.rx_config.filter_ticks_thresh = RMT_FILTER_TICKS_THRESH;
-    config.rx_config.idle_threshold      = RMT_IDLE_THRESHOLD_TICKS;
+// Fast Interrupt Service Routines
+static void IRAM_ATTR isrLeft() {
+    s_channelLeft.handleEdge();
+}
 
-    esp_err_t err = rmt_config(&config);
-    if (err != ESP_OK) {
-        Serial.printf("[IRController] ERROR: rmt_config failed for %s (ch %d, pin %d): %d\n",
-                      channel.name, channel.rmtChannel, channel.pin, err);
-        return false;
-    }
-
-    err = rmt_driver_install(channel.rmtChannel, RMT_RING_BUF_SIZE, 0);
-    if (err != ESP_OK) {
-        Serial.printf("[IRController] ERROR: rmt_driver_install failed for %s: %d\n",
-                      channel.name, err);
-        return false;
-    }
-
-    err = rmt_get_ringbuf_handle(channel.rmtChannel, &channel.ringbuf);
-    if (err != ESP_OK || channel.ringbuf == nullptr) {
-        Serial.printf("[IRController] ERROR: rmt_get_ringbuf_handle failed for %s: %d\n",
-                      channel.name, err);
-        return false;
-    }
-
-    err = rmt_rx_start(channel.rmtChannel, true);
-    if (err != ESP_OK) {
-        Serial.printf("[IRController] ERROR: rmt_rx_start failed for %s: %d\n",
-                      channel.name, err);
-        return false;
-    }
-
-    channel.initialized = true;
-    return true;
+static void IRAM_ATTR isrRight() {
+    s_channelRight.handleEdge();
 }
 
 // ============================================================================
@@ -84,14 +117,14 @@ static uint32_t s_lastBlueTime   = 0;
 static uint16_t s_decodeBuf[IR_BUF_SIZE];
 
 // ============================================================================
-// Robust MagiQuest Bitstream Decoder
+// High-Performance MagiQuest Bitstream Decoder
 // ============================================================================
 // MagiQuest Bitstream Specification:
-// - Bit period: ~1150us (Mark + Space)
-// - Zero bit: Short Mark (~280us, ~24%), Long Space (~850us)
-// - One bit: Long Mark (~580us, ~50%), Medium Space (~600us)
-// - 56-bit payload: [8 bits header][32 bits Wand ID][16 bits Magnitude]
-// - 48-bit payload: [32 bits Wand ID][16 bits Magnitude]
+// - Bit period: ~1120-1150us (Mark + Space)
+// - Zero bit: Short Mark (~280us, ~25%), Long Space (~840us)
+// - One bit: Long Mark (~560us, ~50%), Medium Space (~560us)
+// - 56-bit payload: [8 bits preamble: 0x00][32 bits Wand ID][16 bits Magnitude]
+// - Strict 56-bit verification ensures zero bit-shift corruption.
 static bool decodeMagiQuestCustom(const uint16_t* rawbuf, uint16_t rawlen, uint32_t& wandId, uint16_t& magnitude) {
     if (!rawbuf || rawlen < 100) {
         return false;
@@ -209,45 +242,34 @@ static bool decodeMagiQuestCustom(const uint16_t* rawbuf, uint16_t rawlen, uint3
 // ============================================================================
 // Internal Event Processing
 // ============================================================================
-// ============================================================================
-// Internal Event Processing via Hardware RMT
-// ============================================================================
-static void processChannelRMT(IRChannel& channel) {
-    if (!channel.initialized || channel.ringbuf == nullptr) return;
+static void processChannelPacket(IRChannel& channel) {
+    uint8_t bufIdx = 255;
 
-    size_t rx_size = 0;
-    // Non-blocking drain of the FreeRTOS ringbuffer filled by RMT hardware
-    rmt_item32_t* items = static_cast<rmt_item32_t*>(xRingbufferReceive(channel.ringbuf, &rx_size, 0));
-    if (items == nullptr || rx_size == 0) {
+    // Micro-critical section (<30ns): swap active buffer index atomically
+    noInterrupts();
+    bufIdx = channel.readyBuf;
+    channel.readyBuf = 255;
+    interrupts();
+
+    if (bufIdx >= 2) {
         return;
     }
 
-    size_t num_items = rx_size / sizeof(rmt_item32_t);
-    uint16_t sampleIdx = 1;
-    s_decodeBuf[0] = 1; // Dummy entry at offset 0 to match decoder expectations
-
-    for (size_t i = 0; i < num_items && sampleIdx < (IR_BUF_SIZE - 2); i++) {
-        if (items[i].duration0 > 0) {
-            s_decodeBuf[sampleIdx++] = items[i].duration0;
-        }
-        if (items[i].duration1 > 0) {
-            s_decodeBuf[sampleIdx++] = items[i].duration1;
-        }
-    }
-
-    // Return the item back to the FreeRTOS ring buffer
-    vRingbufferReturnItem(channel.ringbuf, static_cast<void*>(items));
-
-    // Immediately re-arm the RMT receiver for the next incoming transmission
-    rmt_rx_start(channel.rmtChannel, true);
-
-    if (sampleIdx < 100) {
+    uint16_t len = channel.rawlen[bufIdx];
+    if (len < 100) {
+        channel.rawlen[bufIdx] = 0;
         return;
     }
+
+    // Perform array copying and processing completely outside interrupt-disabled region
+    for (uint16_t i = 0; i < len; i++) {
+        s_decodeBuf[i] = channel.rawbuf[bufIdx][i];
+    }
+    channel.rawlen[bufIdx] = 0;
 
     uint32_t code = 0;
     uint16_t magnitude = 0;
-    bool valid = decodeMagiQuestCustom(s_decodeBuf, sampleIdx, code, magnitude);
+    bool valid = decodeMagiQuestCustom(s_decodeBuf, len, code, magnitude);
 
     uint32_t now = millis();
 
@@ -270,12 +292,12 @@ static void processChannelRMT(IRChannel& channel) {
             StorageController::savePinkWandCode(code);
             s_pairingMode.store(PairingMode::NONE, std::memory_order_release);
             Serial.printf("[IRController] SUCCESS: Paired Pink Wand -> 0x%08X\n", code);
-            LedController::showPairingFeedback(true);
+            LedController::triggerPairingFeedback(true);
         } else if (currentPairing == PairingMode::BLUE) {
             StorageController::saveBlueWandCode(code);
             s_pairingMode.store(PairingMode::NONE, std::memory_order_release);
             Serial.printf("[IRController] SUCCESS: Paired Blue Wand -> 0x%08X\n", code);
-            LedController::showPairingFeedback(false);
+            LedController::triggerPairingFeedback(false);
         } else {
             // Operational mode matching
             uint32_t pinkCode = StorageController::getPinkWandCode();
@@ -287,11 +309,11 @@ static void processChannelRMT(IRChannel& channel) {
 
                 if (s_lastBlueTime > 0 && (now - s_lastBlueTime <= WAND_RAPID_WINDOW_MS)) {
                     Serial.println(F("[IRController] Rapid succession detected -> Dueling Splotches!"));
-                    LedController::triggerSplotches();
+                    LedController::setMode(VisualMode::SPLOTCHES);
                     s_lastPinkTime = 0;
                     s_lastBlueTime = 0;
                 } else {
-                    LedController::setPink();
+                    LedController::setMode(VisualMode::PINK);
                 }
             } else if (blueCode != 0 && code == blueCode) {
                 Serial.printf("[IRController] %s: Blue Wand detected!\n", channel.name);
@@ -299,22 +321,22 @@ static void processChannelRMT(IRChannel& channel) {
 
                 if (s_lastPinkTime > 0 && (now - s_lastPinkTime <= WAND_RAPID_WINDOW_MS)) {
                     Serial.println(F("[IRController] Rapid succession detected -> Dueling Splotches!"));
-                    LedController::triggerSplotches();
+                    LedController::setMode(VisualMode::SPLOTCHES);
                     s_lastPinkTime = 0;
                     s_lastBlueTime = 0;
                 } else {
-                    LedController::setBlue();
+                    LedController::setMode(VisualMode::BLUE);
                 }
             } else {
                 Serial.printf("[IRController] %s: Wand 0x%08X not matched to Pink (0x%08X) or Blue (0x%08X)\n",
                               channel.name, code, pinkCode, blueCode);
             }
         }
-    } else if (sampleIdx >= 100) {
+    } else if (len >= 100) {
         // Log unrecognized full pulse burst for diagnosis
         Serial.printf("[IRController] %s: Unrecognized IR signal (%d samples). First pulses (us): ",
-                      channel.name, sampleIdx);
-        for (uint16_t i = 1; i < sampleIdx && i <= 8; i += 2) {
+                      channel.name, len);
+        for (uint16_t i = 1; i < len && i <= 8; i += 2) {
             Serial.printf("[M:%u S:%u] ", s_decodeBuf[i] * IR_RAW_TICK_US, s_decodeBuf[i + 1] * IR_RAW_TICK_US);
         }
         Serial.println();
@@ -326,22 +348,21 @@ static void processChannelRMT(IRChannel& channel) {
 // ============================================================================
 
 void IRController::init() {
-    // Configure internal pull-ups on IR receiver GPIO pins
+    // Configure both Left and Right shoulder IR receiver pins with internal pull-ups
     pinMode(PIN_IR_RECV_LEFT,  INPUT_PULLUP);
     pinMode(PIN_IR_RECV_RIGHT, INPUT_PULLUP);
 
-    bool leftOk  = initRMTChannel(s_channelLeft);
-    bool rightOk = initRMTChannel(s_channelRight);
+    attachInterrupt(PIN_IR_RECV_LEFT,  isrLeft,  CHANGE);
+    attachInterrupt(PIN_IR_RECV_RIGHT, isrRight, CHANGE);
 
-    Serial.printf("[IRController] Hardware RMT IR Receivers initialized:\n");
-    Serial.printf("               - Left Shoulder:  GPIO %d (D1), RMT Channel %d [%s]\n",
-                  PIN_IR_RECV_LEFT, s_channelLeft.rmtChannel, leftOk ? "OK" : "FAILED");
-    Serial.printf("               - Right Shoulder: GPIO %d (D0), RMT Channel %d [%s]\n",
-                  PIN_IR_RECV_RIGHT, s_channelRight.rmtChannel, rightOk ? "OK" : "FAILED");
+    Serial.printf("[IRController] Dual IR Receivers initialized:\n");
+    Serial.printf("               - Left Shoulder:  GPIO %d (D1)\n", PIN_IR_RECV_LEFT);
+    Serial.printf("               - Right Shoulder: GPIO %d (D0)\n", PIN_IR_RECV_RIGHT);
 }
 
 void IRController::update() {
-    uint32_t now = millis();
+    uint32_t now   = millis();
+    uint32_t nowUs = micros();
 
     // 1. Check pairing mode timeout
     PairingMode currentPairing = s_pairingMode.load(std::memory_order_relaxed);
@@ -353,9 +374,17 @@ void IRController::update() {
         }
     }
 
-    // 2. Poll hardware RMT ring buffers on both channels (non-blocking)
-    processChannelRMT(s_channelLeft);
-    processChannelRMT(s_channelRight);
+    // 2. Check for inter-packet silence timeout on both channels
+    s_channelLeft.checkTimeout(nowUs);
+    s_channelRight.checkTimeout(nowUs);
+
+    // 3. Process completed packets on either receiver
+    if (s_channelLeft.readyBuf != 255) {
+        processChannelPacket(s_channelLeft);
+    }
+    if (s_channelRight.readyBuf != 255) {
+        processChannelPacket(s_channelRight);
+    }
 }
 
 void IRController::startPairingPink() {
@@ -370,6 +399,14 @@ void IRController::startPairingBlue() {
     Serial.println(F("[IRController] Entering Pairing Mode for Blue Wand (awaiting wand flick on either shoulder...)"));
 }
 
+void IRController::startPairing(WandType type) {
+    if (type == WandType::PINK) {
+        startPairingPink();
+    } else if (type == WandType::BLUE) {
+        startPairingBlue();
+    }
+}
+
 void IRController::cancelPairing() {
     s_pairingMode.store(PairingMode::NONE, std::memory_order_release);
     Serial.println(F("[IRController] Pairing Mode cancelled"));
@@ -377,6 +414,10 @@ void IRController::cancelPairing() {
 
 PairingMode IRController::getPairingMode() {
     return s_pairingMode.load(std::memory_order_acquire);
+}
+
+PairingState IRController::getPairingState() {
+    return getPairingMode();
 }
 
 bool IRController::isPairingActive() {

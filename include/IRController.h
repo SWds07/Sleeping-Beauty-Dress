@@ -13,6 +13,17 @@ enum class PairingMode : uint8_t {
     BLUE
 };
 
+// Aliases matching PROJECT.md interface contracts
+using PairingState = PairingMode;
+
+/**
+ * @brief Wand selection enum for pairing
+ */
+enum class WandType : uint8_t {
+    PINK = 1,
+    BLUE = 2
+};
+
 class IRController {
 public:
     static void init();
@@ -21,10 +32,12 @@ public:
     // Wand pairing triggers
     static void startPairingPink();
     static void startPairingBlue();
+    static void startPairing(WandType type);
     static void cancelPairing();
 
     // State inspection
     static PairingMode getPairingMode();
+    static PairingState getPairingState();
     static bool isPairingActive();
     static uint32_t getLastReceivedCode();
 };
