@@ -6,6 +6,9 @@
 #include "WebController.h"
 
 void setup() {
+    // 0. Hardware Pin Clamp to guarantee dark boot and suppress floating gate latch
+    LedController::earlyPinClamp();
+
     Serial.begin(115200);
     delay(200); // Short settle time for hardware UART on cold boot
 
@@ -19,11 +22,11 @@ void setup() {
     StorageController::init();
     Serial.println(F("[Main] StorageController initialized"));
 
-    // 2. Initialize FastLED drivers across 3 hardware pins
+    // 2. Initialize NeoPixelBus LED drivers across hardware pins (synchronous dark push)
     LedController::init();
-    Serial.println(F("[Main] LedController initialized (150 LEDs across Skirt, Left Sleeve, Right Sleeve)"));
+    Serial.println(F("[Main] LedController initialized (Skirt GPIO 4, Upper GPIO 5)"));
 
-    // 3. Initialize 38KHz IR receiver and decoder
+    // 3. Initialize 38KHz IR receiver and decoder (GPIO interrupts)
     IRController::init();
     Serial.println(F("[Main] IRController initialized"));
 
@@ -42,3 +45,4 @@ void loop() {
     IRController::update();
     WebController::update();
 }
+
