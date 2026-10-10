@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
+#include <ctype.h>
 
 // ============================================================================
 // Network & Server Instances
@@ -15,7 +16,7 @@ static DNSServer s_dnsServer;
 static AsyncWebServer s_server(HTTP_PORT);
 
 // ============================================================================
-// Mobile-Responsive HTML5 Portal Page
+// Mobile-Responsive Single-Page Web Management UI (PROGMEM Flash)
 // ============================================================================
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -84,6 +85,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
       box-shadow: 0 0 14px rgba(168, 85, 247, 0.6);
     }
     .status-OFF { background: #444; color: #aaa; }
+    .status-PAIRING_FEEDBACK { background: #f59e0b; color: #fff; box-shadow: 0 0 12px rgba(245, 158, 11, 0.6); }
     .wand-row {
       display: flex;
       justify-content: space-between;
@@ -112,6 +114,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
       font-weight: 600;
       cursor: pointer;
       color: #fff;
+      min-height: 48px;
       transition: transform 0.1s, opacity 0.2s;
     }
     button:active { transform: scale(0.97); }
@@ -156,6 +159,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
       text-align: center;
       font-weight: bold;
       animation: pulse 1s infinite alternate;
+      margin-bottom: 10px;
     }
     @keyframes pulse { from { opacity: 0.7; } to { opacity: 1; } }
     .slider-row {
@@ -167,6 +171,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     input[type=range] {
       flex: 1;
       accent-color: #a855f7;
+      height: 8px;
     }
   </style>
 </head>
@@ -174,7 +179,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div class="container">
     <h1>Sleeping Beauty Dress</h1>
 
-    <!-- Status Card -->
+    <!-- Live Status Card -->
     <div class="card">
       <div class="card-title">Dress State</div>
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
@@ -183,75 +188,103 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
       </div>
       <div id="pairingBanner" class="pairing-banner"></div>
       <div class="wand-row">
+        <span>Active Brightness:</span>
+        <span id="statusBrightness" class="wand-code">160</span>
+      </div>
+      <div class="wand-row">
         <span>Pink Wand Code:</span>
-        <span id="pinkCode" class="wand-code">--</span>
+        <span id="pinkCode" class="wand-code">Not Paired</span>
       </div>
       <div class="wand-row" style="border-bottom:none;">
         <span>Blue Wand Code:</span>
-        <span id="blueCode" class="wand-code">--</span>
+        <span id="blueCode" class="wand-code">Not Paired</span>
       </div>
     </div>
 
-    <!-- Manual Controls -->
+    <!-- Mode Overrides -->
     <div class="card">
-      <div class="card-title">Manual Overrides</div>
+      <div class="card-title">Color Overrides</div>
       <div class="btn-grid">
-        <button class="btn-pink" onclick="sendAction('/setPink')">Make It Pink!</button>
-        <button class="btn-blue" onclick="sendAction('/setBlue')">Make It Blue!</button>
-        <button class="btn-splotches" onclick="sendAction('/setSplotches')">Dueling Splotches</button>
-        <button class="btn-off" onclick="sendAction('/setOff')">Turn Off</button>
+        <button class="btn-pink" onclick="sendAction('/setPink')">Pink</button>
+        <button class="btn-blue" onclick="sendAction('/setBlue')">Blue</button>
+        <button class="btn-splotches" onclick="sendAction('/setSplotches')">Splotches</button>
+        <button class="btn-off" onclick="sendAction('/setOff')">Off</button>
       </div>
     </div>
 
-    <!-- Wand Pairing Controls -->
+    <!-- Wand Registration Controls -->
     <div class="card">
       <div class="card-title">Wand Registration</div>
       <p style="font-size:0.8rem; color:#aaa; margin-bottom:12px;">
-        Tap a button, then flick the wand at the dress IR receiver within 30 seconds.
+        Tap a button, then flick the wand at the shoulder receiver within 30 seconds.
       </p>
       <div class="btn-grid">
-        <button class="btn-pair-pink" onclick="sendAction('/register/pink')">Register Pink Wand</button>
-        <button class="btn-pair-blue" onclick="sendAction('/register/blue')">Register Blue Wand</button>
+        <button class="btn-pair-pink" onclick="sendAction('/register/pink')">Pair Pink Wand</button>
+        <button class="btn-pair-blue" onclick="sendAction('/register/blue')">Pair Blue Wand</button>
         <button class="btn-cancel" onclick="sendAction('/register/cancel')">Cancel Pairing</button>
       </div>
     </div>
 
     <!-- Brightness Slider -->
     <div class="card">
-      <div class="card-title">Brightness</div>
+      <div class="card-title">Brightness (0-255)</div>
       <div class="slider-row">
-        <input type="range" id="brightnessSlider" min="10" max="160" value="160" onchange="setBrightness(this.value)">
+        <input type="range" id="brightnessSlider" min="0" max="255" value="160"
+               oninput="onBrightnessInput(this.value)" onchange="onBrightnessChange(this.value)">
         <span id="brightnessVal" style="font-family:monospace; min-width:32px;">160</span>
       </div>
     </div>
   </div>
 
   <script>
+    let isDraggingSlider = false;
     function sendAction(endpoint) {
       fetch(endpoint).then(r => r.json()).then(pollStatus).catch(console.error);
     }
-    function setBrightness(val) {
+    function onBrightnessInput(val) {
+      isDraggingSlider = true;
       document.getElementById('brightnessVal').innerText = val;
-      fetch('/setBrightness?val=' + val);
+    }
+    function onBrightnessChange(val) {
+      isDraggingSlider = false;
+      document.getElementById('brightnessVal').innerText = val;
+      fetch('/setBrightness?val=' + val).catch(console.error);
     }
     function pollStatus() {
       fetch('/api/status')
         .then(r => r.json())
         .then(d => {
           const badge = document.getElementById('modeBadge');
-          badge.innerText = d.mode;
-          badge.className = 'status-badge status-' + d.mode;
+          if (badge) {
+            badge.innerText = d.mode;
+            badge.className = 'status-badge status-' + d.mode;
+          }
 
-          document.getElementById('pinkCode').innerText = d.pinkWand;
-          document.getElementById('blueCode').innerText = d.blueWand;
+          const brightEl = document.getElementById('statusBrightness');
+          if (brightEl) brightEl.innerText = d.brightness;
+
+          const pinkEl = document.getElementById('pinkCode');
+          if (pinkEl) pinkEl.innerText = d.pinkWand;
+
+          const blueEl = document.getElementById('blueCode');
+          if (blueEl) blueEl.innerText = d.blueWand;
+
+          if (!isDraggingSlider) {
+            const slider = document.getElementById('brightnessSlider');
+            if (slider) slider.value = d.brightness;
+            const bVal = document.getElementById('brightnessVal');
+            if (bVal) bVal.innerText = d.brightness;
+          }
 
           const banner = document.getElementById('pairingBanner');
-          if (d.pairing && d.pairing !== 'NONE') {
-            banner.style.display = 'block';
-            banner.innerText = 'PAIRING ACTIVE: Flick ' + d.pairing + ' Wand now!';
-            banner.style.background = (d.pairing === 'PINK') ? '#ff1493' : '#0078ff';
-          } else {
-            banner.style.display = 'none';
+          if (banner) {
+            if (d.pairing && d.pairing !== 'NONE') {
+              banner.style.display = 'block';
+              banner.innerText = 'PAIRING ACTIVE: Flick ' + d.pairing + ' Wand now!';
+              banner.style.background = (d.pairing === 'PINK') ? '#ff1493' : '#0078ff';
+            } else {
+              banner.style.display = 'none';
+            }
           }
         })
         .catch(console.error);
@@ -268,28 +301,31 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 // ============================================================================
 
 void WebController::init() {
-    // 1. Configure WiFi Access Point
+    // 1. Configure WiFi SoftAP (192.168.4.1 / 255.255.255.0, channel 1, max 4 clients)
     WiFi.mode(WIFI_AP);
-    bool apStarted = WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
-    IPAddress apIP = WiFi.softAPIP();
+    IPAddress apIP(192, 168, 4, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    WiFi.softAPConfig(apIP, apIP, subnet);
+    bool apStarted = WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 1, 0, 4);
 
     if (apStarted) {
-        Serial.printf("[WebController] AP '%s' started at http://%s\n", WIFI_AP_SSID, apIP.toString().c_str());
+        Serial.printf("[WebController] SoftAP '%s' started at http://%s (ch=1, max=4)\n",
+                      WIFI_AP_SSID, apIP.toString().c_str());
     } else {
-        Serial.println(F("[WebController] ERROR: Failed to start WiFi AP"));
+        Serial.println(F("[WebController] ERROR: Failed to start WiFi SoftAP"));
     }
 
-    // 2. Start DNS Server on port 53 for captive portal
+    // 2. Start DNS Wildcard Responder on port 53 for Captive Portal
     s_dnsServer.start(DNS_PORT, "*", apIP);
-    Serial.printf("[WebController] Captive portal DNS server started on port %d\n", DNS_PORT);
+    Serial.printf("[WebController] Captive portal DNS server started on UDP port %d\n", DNS_PORT);
 
     // 3. Register HTTP Routes
-    // Main landing portal
+    // Main landing portal (Single-Page App in flash PROGMEM)
     s_server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send(200, "text/html", INDEX_HTML);
     });
 
-    // API: System Status
+    // REST API: Live Dress Status (Zero heap allocation, 256-byte fixed stack buffer)
     s_server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
         char json[256];
         uint32_t pinkCode = StorageController::getPinkWandCode();
@@ -315,7 +351,7 @@ void WebController::init() {
         request->send(200, "application/json", json);
     });
 
-    // API: Manual Overrides
+    // REST API: Color Mode Overrides
     s_server.on("/setPink", HTTP_GET, [](AsyncWebServerRequest *request) {
         LedController::setPink();
         request->send(200, "application/json", "{\"status\":\"ok\",\"mode\":\"PINK\"}");
@@ -336,7 +372,7 @@ void WebController::init() {
         request->send(200, "application/json", "{\"status\":\"ok\",\"mode\":\"OFF\"}");
     });
 
-    // API: Wand Pairing
+    // REST API: Wand Pairing Triggers
     s_server.on("/register/pink", HTTP_GET, [](AsyncWebServerRequest *request) {
         IRController::startPairingPink();
         request->send(200, "application/json", "{\"status\":\"ok\",\"pairing\":\"PINK\"}");
@@ -352,18 +388,31 @@ void WebController::init() {
         request->send(200, "application/json", "{\"status\":\"ok\",\"pairing\":\"NONE\"}");
     });
 
-    // API: Brightness Control
-    s_server.on("/setBrightness", HTTP_GET, [](AsyncWebServerRequest *request) {
+    // REST API: Brightness Control (Shared handler for both /setBrightness and /brightness)
+    auto handleBrightness = [](AsyncWebServerRequest *request) {
         if (request->hasParam("val")) {
-            int val = request->getParam("val")->value().toInt();
-            if (val < 0) val = 0;
-            if (val > 255) val = 255;
-            LedController::setBrightness(static_cast<uint8_t>(val));
+            String valStr = request->getParam("val")->value();
+            bool hasDigit = false;
+            for (size_t i = 0; i < valStr.length(); i++) {
+                if (isdigit(static_cast<unsigned char>(valStr[i]))) {
+                    hasDigit = true;
+                    break;
+                }
+            }
+            if (hasDigit) {
+                long val = valStr.toInt();
+                if (val < 0) val = 0;
+                if (val > 255) val = 255;
+                LedController::setBrightness(static_cast<uint8_t>(val));
+            }
         }
         request->send(200, "application/json", "{\"status\":\"ok\"}");
-    });
+    };
 
-    // Captive Portal Detection Redirects (Android, iOS, Windows)
+    s_server.on("/setBrightness", HTTP_GET, handleBrightness);
+    s_server.on("/brightness",    HTTP_GET, handleBrightness);
+
+    // Captive Portal OS Probes: 302 Found Redirect to http://192.168.4.1/
     s_server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->redirect("http://192.168.4.1/");
     });
@@ -380,12 +429,12 @@ void WebController::init() {
         request->redirect("http://192.168.4.1/");
     });
 
-    // Catch-all 404 handler redirecting to captive portal
+    // Catch-all 404 Handler redirecting unknown paths to captive portal root
     s_server.onNotFound([](AsyncWebServerRequest *request) {
         request->redirect("http://192.168.4.1/");
     });
 
-    // Start Web Server
+    // Start Async Web Server
     s_server.begin();
     Serial.println(F("[WebController] Asynchronous HTTP Web Server started"));
 }
