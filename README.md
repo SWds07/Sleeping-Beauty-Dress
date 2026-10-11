@@ -52,9 +52,10 @@ MagiQuest wands (Creative Kingdoms / Great Wolf Lodge) emit active 38KHz pulse-w
 * **Wand Transmission Behavior**:
   - When flicked, a wand transmits **2 to 4 repeated bursts** separated by $10\text{ms} - 25\text{ms}$ gaps.
 
-### Current Implementation: Software Interrupts vs. Hardware RMT
-* **Current Driver**: We are currently utilizing **GPIO edge-triggered software CPU interrupts** (`attachInterrupt(..., CHANGE)` with `micros()` timestamping), **not the hardware RMT peripheral**.
-* **Ping-Pong (Double) Buffering**: Each shoulder receiver channel has independent double buffers (`rawbuf[2][160]`). While one completed frame is published to the main loop, subsequent repeat bursts write to the alternate buffer, preventing overwrite or corruption.
+### Current Implementation: Software Interrupts with IRAM Cache Safety
+* **Interrupt Driver**: Uses **GPIO edge-triggered software CPU interrupts** (`attachInterrupt(..., CHANGE)`) on GPIO 3 (Left Shoulder) and GPIO 2 (Right Shoulder).
+* **IRAM Flash Cache Safety**: Timestamping uses ESP-IDF native `esp_timer_get_time()`, residing 100% in IRAM (`.iram0.text`) with zero branches to SPI flash (`.flash.text`). This prevents ESP32 cache disabled panics when pairing new wands and committing IDs to NVS flash storage.
+* **Ping-Pong (Double) Buffering**: Each shoulder receiver channel has independent double buffers (`rawbuf[2][160]`). While one completed frame is published to the main loop, subsequent repeat bursts write to the alternate buffer, preventing overwrite or corruption. Index swapping executes in 4 CPU instructions.
 * **Fast 3.5ms Inter-Burst Silence Timeout**: Intra-packet bit spaces are $\le 1000\mu\text{s}$, while inter-burst gaps are $\ge 10\text{ms}$. Setting the silence timeout to 3.5ms isolates each burst immediately, cutting reaction latency from $\sim 280\text{ms}$ down to $\sim 3.5\text{ms}$.
 * **Strict 56-Bit Preamble Validation**: Requires exact 56-bit alignment and verifies `(data >> 48) == 0x00`. Prevents bit-slipped frames from generating false IDs (e.g., `0xD8854475` or `0x31C11685`).
 
@@ -67,19 +68,24 @@ MagiQuest wands (Creative Kingdoms / Great Wolf Lodge) emit active 38KHz pulse-w
 
 ---
 
-## 3. Hardware Roadmap & Upgrade Options
+## 3. Hardware Architecture & Hardware Upgrades
 
-### 1. Drop-in MCU Upgrade: Seeed Studio XIAO ESP32-S3
-* **Why upgrade?**:
-  - On the single-core ESP32-C3, `FastLED.show()` must disable CPU interrupts during WS2812B bit-banging ($\sim 4.5\text{ms}$ per frame for 150 LEDs across 3 pins). If a wand flick occurs during that window, edges can be missed.
+### 1. Hardware RMT Peripheral Driver (`NeoPixelBus`)
+* The ESP32-C3 features strictly 2 hardware RMT TX channels (Channel 0 and Channel 1).
+* `makuna/NeoPixelBus @ ^2.8.4` maps dedicated hardware RMT methods directly to the pins:
+  - `NeoEsp32Rmt0Ws2812xMethod` drives **GPIO 4 (D2, Skirt, 100 LEDs)** via RMT Channel 0.
+  - `NeoEsp32Rmt1Ws2812xMethod` drives **GPIO 5 (D3, Upper Body & Sleeves, 50 LEDs)** via RMT Channel 1.
+  - GPIO 6 (D4) is permanently disabled to respect the 2-channel hardware limit.
+* **Zero Interrupt Masking**: Unlike bit-banging drivers, RMT hardware transmits frames via dedicated DMA/FIFO buffers in hardware. Frame rendering never disables CPU interrupts and never causes dropped IR wand pulses.
+* **Power-On Dark Clamp**: `LedController::earlyPinClamp()` holds GPIO 4 and GPIO 5 `LOW` with internal pull-downs enabled and holds for $>400\mu\text{s}$ before initializing peripheral registers, eliminating the power-on solid-white latch-up.
+
+### 2. Drop-in MCU Upgrade: Seeed Studio XIAO ESP32-S3 (Optional)
+* **When to upgrade?**:
+  - If additional hardware RMT channels are desired (e.g. driving 3 or more independent LED strips) or simultaneous high-throughput WiFi + BLE is required.
 * **The XIAO ESP32-S3 advantage**:
   - **Exact same physical form-factor and pinout**: Drops directly into the existing dress socket with zero wiring changes.
-  - **Dual-Core Xtensa LX7 @ 240MHz**: FastLED and the Async Web Server run on Core 0, while IR edge capture and decoding run on Core 1 completely uninterrupted.
-  - 8MB Flash / 512KB SRAM / 2MB PSRAM.
-
-### 2. Hardware RMT Peripheral Migration (on ESP32-C3)
-* If remaining on the ESP32-C3, the driver can be migrated to the internal ESP-IDF **RMT (Remote Control Transceiver)** peripheral.
-* The RMT hardware uses dedicated hardware counters and DMA channels to record pulse durations independently of the CPU, making it immune to `FastLED.show()` interrupt masking without requiring a second microcontroller.
+  - **Dual-Core Xtensa LX7 @ 240MHz**: Web and animations run on Core 0, while IR edge capture and decoding run on Core 1 completely uninterrupted.
+  - 8 RMT channels (4 TX, 4 RX), 8MB Flash, 512KB SRAM, 2MB PSRAM.
 
 ### 3. Receiver Upgrade: Vishay TSOP38238
 * Upgrading generic VS1838B clones to genuine **Vishay TSOP38238** (or TSOP34838) receivers provides superior optical filtering against sunlight and theatrical stage lighting, with active AGC4 noise suppression and consistent pulse-width reproduction.
@@ -116,20 +122,67 @@ MagiQuest wands (Creative Kingdoms / Great Wolf Lodge) emit active 38KHz pulse-w
 6. **Manual Overrides**:
    - Use the web interface buttons (Pink, Blue, Splotches, Off, and Brightness Slider) for immediate manual control.
 
+### REST API Reference
+
+The asynchronous web server exposes the following zero-heap HTTP GET endpoints:
+
+| Endpoint | Method | Response | Description |
+|---|---|---|---|
+| `/` | `GET` | `text/html` | Serves the single-page responsive control app stored in `PROGMEM` |
+| `/api/status` | `GET` | `application/json` | Returns live status: `{"mode":"...","pinkWand":"...","blueWand":"...","pairing":"...","brightness":...}` |
+| `/setPink` | `GET` | `application/json` | Overrides lighting to Princess Aurora Deep Pink (`#FF1493`) |
+| `/setBlue` | `GET` | `application/json` | Overrides lighting to Merryweather Royal Blue (`#0078FF`) |
+| `/setSplotches`| `GET` | `application/json` | Overrides lighting to dynamic dueling Splotches animation with fairy dust |
+| `/setOff` | `GET` | `application/json` | Turns off all LEDs (`#000000`) |
+| `/register/pink`| `GET` | `application/json` | Enters 30-second pairing window for the Pink Wand |
+| `/register/blue`| `GET` | `application/json` | Enters 30-second pairing window for the Blue Wand |
+| `/register/cancel`| `GET` | `application/json`| Cancels active wand pairing window |
+| `/setBrightness?val=<0-255>`| `GET`| `application/json`| Adjusts master LED brightness (also available at `/brightness`) |
+
 ---
 
-## 6. Build & Compilation
+## 6. Build & Flashing
 
-Built using PlatformIO Core:
+Built using PlatformIO Core targeting the `seeed_xiao_esp32c3` environment:
 
 ```powershell
-# Compile firmware
+# Compile firmware in release mode
 pio run
 
-# Flash to device via USB
+# Flash to board via USB-C
 pio run --target upload
 
-# Open serial monitor
+# Open serial monitor (115200 baud)
 pio device monitor -b 115200
 ```
+
+### Memory Footprint
+* **RAM**: 12.8% (41,876 / 327,680 bytes)
+* **Flash**: 42.4% (833,426 / 1,966,080 bytes)
+
+---
+
+## 7. Automated E2E Test Suite
+
+The repository includes a comprehensive 196-test automated verification suite located in `tests/`:
+
+```powershell
+# Run the complete test suite
+python tests/run_tests.py
+```
+
+### Test Coverage Hierarchy
+* **Tier 1: Feature Coverage (85 tests)**: 5 tests for each of the 17 system features (`tests/tier1_features/`).
+* **Tier 2: Boundary & Corner Cases (85 tests)**: 5 tests for each feature probing timing, memory limits, and signal noise (`tests/tier2_boundaries/`).
+* **Tier 3: Cross-Feature Combinations (17 tests)**: Pairwise subsystem concurrency testing (`tests/tier3_cross_feature/`).
+* **Tier 4: Real-World Scenarios (9 tests)**: Full multi-step operational journeys (`tests/tier4_real_world/`).
+
+---
+
+## 8. Bluetooth Low Energy & Android Companion Architecture
+
+For environments where WiFi captive portals are inconvenient, the repository defines a dedicated Bluetooth Low Energy (BLE 5.0) GATT profile specification to support a native Android companion app.
+
+* Specification Document: [`docs/BLUETOOTH_SPECIFICATION.md`](docs/BLUETOOTH_SPECIFICATION.md)
+* Includes complete GATT service hierarchy (`19590001-...`), packed binary telemetry structs, 1-byte command opcodes, and prompt requirements for generating the native Kotlin / Jetpack Compose Android client in a separate repository.
 

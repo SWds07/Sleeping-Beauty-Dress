@@ -155,4 +155,4 @@ Complete end-to-end user journeys in `test_real_world_scenarios.py`:
 ## 4. Verification & Validation
 - **Automated Verification**: Ran `python tests/run_tests.py` and `py -3 tests/run_tests.py`.
 - **Result**: 196 passed, 0 failed, duration < 0.01s.
-- **PlatformIO Compilation**: Verified via `pio run` (Release mode, RAM: 17.3%, Flash: 70.9%).
+- **PlatformIO Compilation**: Verified via `pio run` (Release mode, RAM: 12.8% / 41.8KB, Flash: 42.4% / 833.4KB, build duration: ~4.7s).
