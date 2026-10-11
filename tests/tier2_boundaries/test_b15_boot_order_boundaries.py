@@ -33,14 +33,14 @@ class TestBoundary15BootOrderBoundaries(unittest.TestCase):
             "StorageController::init()",
             "LedController::init()",
             "IRController::init()",
-            "WebController::init()"
+            "BleController::init()"
         ]
         for s in steps:
             self.assertIn(s, self.main_content)
 
     def test_b15_05_cooperative_multitasking_budget(self):
         """Verify round-robin cycle budget is non-blocking."""
-        cooperative_tasks = ["LedController::update", "IRController::update", "WebController::update"]
+        cooperative_tasks = ["LedController::update", "IRController::update", "BleController::update"]
         self.assertEqual(len(cooperative_tasks), 3)
 
 if __name__ == "__main__":

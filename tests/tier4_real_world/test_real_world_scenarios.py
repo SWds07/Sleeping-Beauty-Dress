@@ -3,8 +3,11 @@ from __future__ import print_function, division, absolute_import
 import unittest
 from tests.helpers import (
     WandInteractionSimulator, MagiQuestEncoder, MagiQuestDecoder,
-    WIFI_AP_SSID, WIFI_AP_IP, NVS_KEY_PINK_WAND, NVS_KEY_BLUE_WAND,
-    LED_MAX_BRIGHTNESS, ANIMATION_FRAME_MS
+    BLE_DEVICE_NAME, BLE_SERVICE_UUID, NVS_KEY_PINK_WAND, NVS_KEY_BLUE_WAND,
+    LED_MAX_BRIGHTNESS, ANIMATION_FRAME_MS,
+    BLE_CMD_SET_OFF, BLE_CMD_SET_PINK, BLE_CMD_SET_BLUE, BLE_CMD_SET_SPLOTCHES,
+    BLE_CMD_PAIR_PINK, BLE_CMD_PAIR_BLUE, BLE_CMD_PAIR_CANCEL,
+    unpack_telemetry
 )
 
 class TestRealWorldScenarios(unittest.TestCase):
@@ -18,7 +21,7 @@ class TestRealWorldScenarios(unittest.TestCase):
         3. StorageController loads stored wand IDs from NVS.
         4. LedController blanks all 150 pixels and executes 350us reset hold.
         5. IRController configures 3.3V GPIO interrupts on shoulders.
-        6. WebController starts SoftAP 'Sleeping-Beauty-Dress' and DNS on port 53.
+        6. BleController starts BLE GATT Server advertising as 'Aurora-Dress'.
         7. System enters cooperative loop with 0mA white flash and 0 brownout.
         """
         # Step 1-3: Storage init
@@ -27,20 +30,23 @@ class TestRealWorldScenarios(unittest.TestCase):
         self.assertEqual(sim.blue_id, 0)
         # Step 4: LED state dark
         self.assertEqual(sim.mode, "OFF")
-        # Step 5-6: Network ready
-        self.assertEqual(WIFI_AP_SSID, "Sleeping-Beauty-Dress")
-        self.assertEqual(WIFI_AP_IP, "192.168.4.1")
-        # Step 7: Status check
-        status, data = sim.handle_rest_request("/api/status")
-        self.assertEqual(status, 200)
-        self.assertEqual(data.get("mode"), "OFF")
-        self.assertEqual(data.get("pinkWand"), "Not Paired")
+        # Step 5-6: BLE ready
+        self.assertEqual(BLE_DEVICE_NAME, "Aurora-Dress")
+        self.assertEqual(BLE_SERVICE_UUID, "19590001-d1e5-4e3b-9a14-c0104d4e5353")
+        # Step 7: Telemetry status check
+        raw = sim.get_ble_telemetry_bytes()
+        self.assertEqual(len(raw), 15)
+        telemetry = unpack_telemetry(raw)
+        self.assertEqual(telemetry["mode"], 0)  # OFF
+        self.assertEqual(telemetry["pinkWandId"], 0)
+        self.assertEqual(telemetry["blueWandId"], 0)
+        self.assertEqual(telemetry["pairingState"], 0)
 
     def test_scenario_02_pink_wand_pairing_flow(self):
-        """Scenario 2: Complete Web-Triggered Pink Wand Pairing Journey.
+        """Scenario 2: Complete BLE-Triggered Pink Wand Pairing Journey.
         Steps:
-        1. User connects smartphone to SoftAP.
-        2. User taps 'Pair Pink Wand' -> HTTP GET /register/pink.
+        1. Android companion app connects to 'Aurora-Dress'.
+        2. App writes opcode 0x10 (PAIR_PINK) to Command characteristic.
         3. Dress enters PAIRING_PINK state with 30s timeout.
         4. User flicks Pink wand (ID 0x2F073545).
         5. Dual IR receiver captures 56-bit MagiQuest bitstream.
@@ -49,10 +55,9 @@ class TestRealWorldScenarios(unittest.TestCase):
         8. Telemetry confirms Pink wand is now paired.
         """
         sim = WandInteractionSimulator(pink_id=0, blue_id=0)
-        # 1-2: Web trigger
-        status, data = sim.handle_rest_request("/register/pink")
-        self.assertEqual(status, 200)
-        self.assertEqual(data.get("pairing"), "PINK")
+        # 1-2: BLE trigger
+        res = sim.handle_ble_command(BLE_CMD_PAIR_PINK)
+        self.assertEqual(res, "OK")
         self.assertEqual(sim.pairing_state, "PINK")
 
         # 4-5: IR capture
@@ -71,21 +76,24 @@ class TestRealWorldScenarios(unittest.TestCase):
         self.assertEqual(sim.pairing_state, "NONE")
 
         # 8: Telemetry
-        status, data = sim.handle_rest_request("/api/status")
-        self.assertEqual(data.get("pinkWand"), "0x2F073545")
+        raw = sim.get_ble_telemetry_bytes()
+        telemetry = unpack_telemetry(raw)
+        self.assertEqual(telemetry["pinkWandId"], pink_wand_code)
+        self.assertEqual(telemetry["mode"], 4)  # PAIRING_FEEDBACK
+        self.assertEqual(telemetry["pairingState"], 0)
 
     def test_scenario_03_blue_wand_pairing_flow(self):
-        """Scenario 3: Complete Web-Triggered Blue Wand Pairing Journey.
+        """Scenario 3: Complete BLE-Triggered Blue Wand Pairing Journey.
         Steps:
-        1. User taps 'Pair Blue Wand' -> HTTP GET /register/blue.
+        1. User taps 'Pair Blue Wand' in app -> writes opcode 0x11 (PAIR_BLUE).
         2. System state transitions to PAIRING_BLUE.
         3. User flicks Blue wand (ID 0x1A2B3C4D).
         4. Wand code decoded and committed to NVS 'auroradress.blue_wand'.
         5. Visual feedback triggered and pairing completes.
         """
         sim = WandInteractionSimulator(pink_id=0x2F073545, blue_id=0)
-        status, data = sim.handle_rest_request("/register/blue")
-        self.assertEqual(status, 200)
+        res = sim.handle_ble_command(BLE_CMD_PAIR_BLUE)
+        self.assertEqual(res, "OK")
         self.assertEqual(sim.pairing_state, "BLUE")
 
         blue_wand_code = 0x1A2B3C4D
@@ -95,52 +103,61 @@ class TestRealWorldScenarios(unittest.TestCase):
         self.assertEqual(sim.nvs[NVS_KEY_BLUE_WAND], blue_wand_code)
         self.assertEqual(sim.mode, "PAIRING_FEEDBACK")
 
+        raw = sim.get_ble_telemetry_bytes()
+        telemetry = unpack_telemetry(raw)
+        self.assertEqual(telemetry["blueWandId"], blue_wand_code)
+        self.assertEqual(telemetry["pinkWandId"], 0x2F073545)
+
     def test_scenario_04_dueling_wand_spell_clash(self):
         """Scenario 4: Live Dueling Wand Spell Clash Interactive Session.
         Steps:
-        1. Both wands paired (Pink: 0x2F073545, Blue: 0x1A2B3C4D).
-        2. Flora casts Pink wand -> dress lights up solid Pink (#FF1493).
-        3. Within 1.5 seconds (<=2000ms), Merryweather casts Blue wand.
-        4. Dress detects rapid succession and launches animated Splotches.
-        5. Splotches algorithm blends Pink and Blue with fairy dust sparkles (#FFFFF0).
+        1. Flora flicks Pink wand (ID 0x2F073545) -> Dress turns PINK.
+        2. Merryweather flicks Blue wand (ID 0x1A2B3C4D) within 1.2s (< 2000ms window).
+        3. Rapid dual wand detected -> triggers SPLOTCHES fairy battle mode.
+        4. Both shoulder receivers process incoming bursts with zero frame collisions.
         """
         sim = WandInteractionSimulator(pink_id=0x2F073545, blue_id=0x1A2B3C4D)
-        # Step 2: Flora casts Pink
+        # Step 1: Flora strikes
         res1 = sim.handle_wand_signal(0x2F073545, 1000)
         self.assertEqual(res1, "DISPATCH_PINK")
         self.assertEqual(sim.mode, "PINK")
 
-        # Step 3-4: Merryweather casts Blue 1.2s later
+        # Step 2-3: Merryweather counters 1200ms later
         res2 = sim.handle_wand_signal(0x1A2B3C4D, 2200)
         self.assertEqual(res2, "DISPATCH_SPLOTCHES")
         self.assertEqual(sim.mode, "SPLOTCHES")
 
     def test_scenario_05_smartphone_captive_portal_onboarding(self):
-        """Scenario 5: Smartphone Captive Portal Join and Onboarding Flow.
+        """Scenario 5: Android BLE Companion App Connection and Control Session.
         Steps:
-        1. Smartphone associates with SSID 'Sleeping-Beauty-Dress'.
-        2. OS sends captive portal probe GET /generate_204.
-        3. WebController issues HTTP 302 redirect to http://192.168.4.1/.
-        4. Mobile browser opens control portal SPA.
-        5. User drags brightness slider to 120 -> GET /brightness?val=120.
-        6. User taps 'Blue' button -> GET /setBlue.
-        7. Dress changes immediately to Merryweather Blue.
+        1. Companion app scans for 'Aurora-Dress' and Service UUID '19590001-...'.
+        2. Connects GATT, enables CCCD notifications on Telemetry characteristic.
+        3. Reads initial 15-byte telemetry packet.
+        4. User drags brightness slider to 120 -> writes 120 to Brightness characteristic.
+        5. User taps 'Make it Blue!' -> writes opcode 0x03 to Command characteristic.
+        6. Dress changes immediately to Merryweather Blue and notifies updated telemetry.
         """
         sim = WandInteractionSimulator()
-        # 2-3: Probe redirect
-        status, headers = sim.handle_rest_request("/generate_204")
-        self.assertEqual(status, 302)
-        self.assertEqual(headers.get("Location"), "http://192.168.4.1/")
+        # 1-3: Verify service & initial telemetry
+        raw = sim.get_ble_telemetry_bytes()
+        self.assertEqual(len(raw), 15)
+        init_telemetry = unpack_telemetry(raw)
+        self.assertEqual(init_telemetry["mode"], 0)  # OFF
 
-        # 5: Brightness adjustment
-        status, _ = sim.handle_rest_request("/brightness", {"val": "120"})
-        self.assertEqual(status, 200)
+        # 4: Brightness adjustment via BLE
+        res_bright = sim.handle_ble_brightness(120)
+        self.assertEqual(res_bright, "OK")
         self.assertEqual(sim.brightness, 120)
 
-        # 6-7: Manual mode override
-        status, data = sim.handle_rest_request("/setBlue")
-        self.assertEqual(status, 200)
+        # 5-6: Mode command override via BLE
+        res_cmd = sim.handle_ble_command(BLE_CMD_SET_BLUE)
+        self.assertEqual(res_cmd, "OK")
         self.assertEqual(sim.mode, "BLUE")
+
+        # Telemetry notification update
+        updated_telemetry = unpack_telemetry(sim.get_ble_telemetry_bytes())
+        self.assertEqual(updated_telemetry["mode"], 2)  # BLUE
+        self.assertEqual(updated_telemetry["brightness"], 120)
 
     def test_scenario_06_pairing_cancellation_and_inactivity_timeout(self):
         """Scenario 6: Wand Pairing Cancellation and Inactivity Timeout.
@@ -153,13 +170,16 @@ class TestRealWorldScenarios(unittest.TestCase):
         """
         sim = WandInteractionSimulator()
         # 1-2: Cancel
-        sim.handle_rest_request("/register/pink")
+        res = sim.handle_ble_command(BLE_CMD_PAIR_PINK)
+        self.assertEqual(res, "OK")
         self.assertEqual(sim.pairing_state, "PINK")
-        sim.handle_rest_request("/register/cancel")
+        res = sim.handle_ble_command(BLE_CMD_PAIR_CANCEL)
+        self.assertEqual(res, "OK")
         self.assertEqual(sim.pairing_state, "NONE")
 
         # 3-5: Timeout
-        sim.handle_rest_request("/register/blue")
+        res = sim.handle_ble_command(BLE_CMD_PAIR_BLUE)
+        self.assertEqual(res, "OK")
         self.assertEqual(sim.pairing_state, "BLUE")
         sim.check_pairing_timeout(32000)  # >30s elapsed
         self.assertEqual(sim.pairing_state, "NONE")
@@ -169,7 +189,7 @@ class TestRealWorldScenarios(unittest.TestCase):
         Steps:
         1. Loop executes cooperative round-robin polling.
         2. Frame rendering throttled to 25ms intervals (~40 FPS).
-        3. Periodic wand triggers and web status polling occur concurrently.
+        3. Periodic wand triggers and BLE telemetry sync occur concurrently.
         4. Zero timing drift or watchdog timeouts.
         """
         sim = WandInteractionSimulator(pink_id=0x11111111, blue_id=0x22222222)
@@ -182,7 +202,8 @@ class TestRealWorldScenarios(unittest.TestCase):
             if tick == 20:
                 sim.handle_wand_signal(0x11111111, current_time_ms)
             elif tick == 40:
-                sim.handle_rest_request("/api/status")
+                raw = sim.get_ble_telemetry_bytes()
+                self.assertEqual(len(raw), 15)
             elif tick == 60:
                 sim.handle_wand_signal(0x22222222, current_time_ms)
 
@@ -193,16 +214,16 @@ class TestRealWorldScenarios(unittest.TestCase):
     def test_scenario_08_power_cycle_nvs_recovery(self):
         """Scenario 8: Power Cycle & Persistent Memory Recovery.
         Steps:
-        1. Pair wands to custom IDs.
+        1. Pair wands to custom IDs via BLE triggers.
         2. System is power-cycled (simulating power off / reboot).
         3. During boot setup(), StorageController::init reads NVS keys.
         4. Learned wand IDs are immediately ready for interaction.
         """
         # Session 1: Pair
         sim1 = WandInteractionSimulator(pink_id=0, blue_id=0)
-        sim1.handle_rest_request("/register/pink")
+        sim1.handle_ble_command(BLE_CMD_PAIR_PINK)
         sim1.handle_wand_signal(0x44445555, 1000)
-        sim1.handle_rest_request("/register/blue")
+        sim1.handle_ble_command(BLE_CMD_PAIR_BLUE)
         sim1.handle_wand_signal(0x66667777, 2000)
 
         saved_nvs = dict(sim1.nvs)

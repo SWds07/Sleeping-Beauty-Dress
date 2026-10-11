@@ -30,8 +30,8 @@ class TestBoundary16BuildSizeBoundaries(unittest.TestCase):
         self.assertIn("monitor_speed = 115200", self.ini_content)
 
     def test_b16_04_no_conflicting_webserver_lib(self):
-        """Verify default WebServer is ignored to prevent conflict with AsyncWebServer."""
-        self.assertIn("lib_ignore = WebServer", self.ini_content)
+        """Verify NeoPixelBus library dependency is declared for LED subsystem."""
+        self.assertIn("makuna/NeoPixelBus @ ^2.8.4", self.ini_content)
 
     def test_b16_05_clean_build_exit_code_zero(self):
         """Verify build environment parameters are valid."""

@@ -108,17 +108,25 @@
 #define PAIRING_TIMEOUT_MS   30000  // Inactivity timeout for wand pairing mode (30s)
 
 // ============================================================================
-// WiFi SoftAP & Web Portal Defaults
+// Bluetooth Low Energy (BLE 5.0) GATT Configuration
 // ============================================================================
-#define WIFI_AP_SSID     "Sleeping-Beauty-Dress"
-#define WIFI_AP_PASSWORD ""   // Open access point
-#define HTTP_PORT        80   // HTTP web server port
-#define DNS_PORT         53   // DNS captive portal port
+#define BLE_DEVICE_NAME             "Aurora-Dress"
 
-// Compatibility aliases
-#define WIFI_AP_PASS        WIFI_AP_PASSWORD
-#define HTTP_SERVER_PORT    HTTP_PORT
-#define CAPTIVE_PORTAL_PORT DNS_PORT
+// 128-bit UUIDs (1959: Sleeping Beauty theatrical release year)
+#define BLE_SERVICE_UUID            "19590001-d1e5-4e3b-9a14-c0104d4e5353"
+#define BLE_CHAR_TELEMETRY_UUID     "19590002-d1e5-4e3b-9a14-c0104d4e5353"
+#define BLE_CHAR_COMMAND_UUID       "19590003-d1e5-4e3b-9a14-c0104d4e5353"
+#define BLE_CHAR_BRIGHTNESS_UUID    "19590004-d1e5-4e3b-9a14-c0104d4e5353"
+#define BLE_CCCD_DESCRIPTOR_UUID    "00002902-0000-1000-8000-00805f9b34fb"
+
+// Command Opcodes for BLE_CHAR_COMMAND_UUID
+#define BLE_CMD_SET_OFF             0x01
+#define BLE_CMD_SET_PINK            0x02
+#define BLE_CMD_SET_BLUE            0x03
+#define BLE_CMD_SET_SPLOTCHES       0x04
+#define BLE_CMD_PAIR_PINK           0x10
+#define BLE_CMD_PAIR_BLUE           0x11
+#define BLE_CMD_PAIR_CANCEL         0x12
 
 #endif // CONFIG_H
 

@@ -13,20 +13,20 @@ class TestFeature15BootCoordination(unittest.TestCase):
             self.main_code = f.read()
 
     def test_f15_01_deterministic_boot_order(self):
-        """Verify boot order: Storage -> LED -> IR -> Web in setup()."""
+        """Verify boot order: Storage -> LED -> IR -> BLE in setup()."""
         idx_storage = self.main_code.find("StorageController::init")
         idx_led = self.main_code.find("LedController::init")
         idx_ir = self.main_code.find("IRController::init")
-        idx_web = self.main_code.find("WebController::init")
+        idx_ble = self.main_code.find("BleController::init")
 
         self.assertNotEqual(idx_storage, -1)
         self.assertNotEqual(idx_led, -1)
         self.assertNotEqual(idx_ir, -1)
-        self.assertNotEqual(idx_web, -1)
+        self.assertNotEqual(idx_ble, -1)
 
         self.assertLess(idx_storage, idx_led)
         self.assertLess(idx_led, idx_ir)
-        self.assertLess(idx_ir, idx_web)
+        self.assertLess(idx_ir, idx_ble)
 
     def test_f15_02_storage_before_led(self):
         """Verify storage loads paired IDs before LED initializes."""
@@ -34,18 +34,18 @@ class TestFeature15BootCoordination(unittest.TestCase):
         idx_led = self.main_code.find("LedController::init")
         self.assertLess(idx_storage, idx_led)
 
-    def test_f15_03_led_dark_before_wifi(self):
-        """Verify LED subsystem is dark clamped before WiFi radio activates."""
+    def test_f15_03_led_dark_before_ble(self):
+        """Verify LED subsystem is dark clamped before BLE radio activates."""
         idx_led = self.main_code.find("LedController::init")
-        idx_web = self.main_code.find("WebController::init")
-        self.assertLess(idx_led, idx_web)
+        idx_ble = self.main_code.find("BleController::init")
+        self.assertLess(idx_led, idx_ble)
 
     def test_f15_04_nonblocking_round_robin_loop(self):
         """Verify loop() non-blocking polling across all three subsystems."""
         loop_section = self.main_code[self.main_code.find("void loop()"):]
         self.assertIn("LedController::update()", loop_section)
         self.assertIn("IRController::update()", loop_section)
-        self.assertIn("WebController::update()", loop_section)
+        self.assertIn("BleController::update()", loop_section)
 
     def test_f15_05_serial_baud_115200(self):
         """Verify Serial monitor baud rate is 115200."""

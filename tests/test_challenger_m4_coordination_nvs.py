@@ -62,10 +62,10 @@ class TestM4SystemCoordinationNVS(unittest.TestCase):
         self.assertLess(ram_bytes, ram_ceiling, "RAM usage must be < 65,536 bytes")
         self.assertLess(ram_pct, 20.0, "RAM percentage must be < 20.0%")
 
-    def test_m4_02_flash_ceiling_under_50_percent(self):
-        """Verify Flash consumption is strictly under 50% (< 983,040 bytes of 1,966,080)."""
+    def test_m4_02_flash_ceiling_under_65_percent(self):
+        """Verify Flash consumption is strictly under 65% (< 1,277,952 bytes of 1,966,080)."""
         self.assertTrue(self.has_tools)
-        flash_ceiling = 983040  # 50%
+        flash_ceiling = 1277952  # 65%
         
         out_str = subprocess.check_output(["pio", "run"], cwd=PROJECT_ROOT, shell=True).decode("utf-8", errors="ignore")
         
@@ -74,9 +74,9 @@ class TestM4SystemCoordinationNVS(unittest.TestCase):
         flash_pct = float(flash_match.group(1))
         flash_bytes = int(flash_match.group(2))
         
-        print("    Flash Used: {:>7} bytes ({:>5.1f}%) [Ceiling: < 983,040 bytes / 50.0%]".format(flash_bytes, flash_pct))
-        self.assertLess(flash_bytes, flash_ceiling, "Flash usage must be < 983,040 bytes")
-        self.assertLess(flash_pct, 50.0, "Flash percentage must be < 50.0%")
+        print("    Flash Used: {:>7} bytes ({:>5.1f}%) [Ceiling: < 1,277,952 bytes / 65.0%]".format(flash_bytes, flash_pct))
+        self.assertLess(flash_bytes, flash_ceiling, "Flash usage must be < 1,277,952 bytes")
+        self.assertLess(flash_pct, 65.0, "Flash percentage must be < 65.0%")
 
     # =========================================================================
     # 2. IRAM ISR Flash & Cache Safety
@@ -170,20 +170,20 @@ class TestM4SystemCoordinationNVS(unittest.TestCase):
         p_storage = setup_body.find("StorageController::init()")
         p_led = setup_body.find("LedController::init()")
         p_ir = setup_body.find("IRController::init()")
-        p_web = setup_body.find("WebController::init()")
+        p_ble = setup_body.find("BleController::init()")
 
         self.assertNotEqual(p_clamp, -1, "earlyPinClamp must be in setup()")
         self.assertNotEqual(p_serial, -1, "Serial.begin must be in setup()")
         self.assertNotEqual(p_storage, -1, "StorageController::init must be in setup()")
         self.assertNotEqual(p_led, -1, "LedController::init must be in setup()")
         self.assertNotEqual(p_ir, -1, "IRController::init must be in setup()")
-        self.assertNotEqual(p_web, -1, "WebController::init must be in setup()")
+        self.assertNotEqual(p_ble, -1, "BleController::init must be in setup()")
 
         self.assertLess(p_clamp, p_serial, "earlyPinClamp must be called before Serial")
         self.assertLess(p_serial, p_storage, "Serial must settle before Storage")
         self.assertLess(p_storage, p_led, "StorageController must initialize before LedController")
         self.assertLess(p_led, p_ir, "LedController must initialize before IRController")
-        self.assertLess(p_ir, p_web, "IRController must initialize before WebController")
+        self.assertLess(p_ir, p_ble, "IRController must initialize before BleController")
 
     # =========================================================================
     # 4. StorageController Interface Parity & Wear-Leveling

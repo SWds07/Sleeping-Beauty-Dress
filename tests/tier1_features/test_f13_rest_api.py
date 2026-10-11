@@ -1,63 +1,65 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, division, absolute_import
 import unittest
-from tests.helpers import WandInteractionSimulator
+from tests.helpers import (
+    WandInteractionSimulator,
+    BLE_CMD_SET_OFF, BLE_CMD_SET_PINK, BLE_CMD_SET_BLUE, BLE_CMD_SET_SPLOTCHES,
+    BLE_CMD_PAIR_PINK, BLE_CMD_PAIR_BLUE, BLE_CMD_PAIR_CANCEL,
+    unpack_telemetry
+)
 
-class TestFeature13RestAPI(unittest.TestCase):
-    """Feature 13: REST API Endpoints (/api/status, overrides, pairing, brightness)."""
+class TestFeature13BleCommandBrightness(unittest.TestCase):
+    """Feature 13: BLE Command & Brightness Control Protocols (1-byte Opcodes & Brightness)."""
 
     def setUp(self):
         self.sim = WandInteractionSimulator(pink_id=0x12345678, blue_id=0x87654321)
 
-    def test_f13_01_api_status_json_schema(self):
-        """Verify /api/status returns required JSON schema fields."""
-        status, data = self.sim.handle_rest_request("/api/status")
-        self.assertEqual(status, 200)
-        self.assertIn("mode", data)
-        self.assertIn("pinkWand", data)
-        self.assertIn("blueWand", data)
-        self.assertIn("pairing", data)
-        self.assertIn("brightness", data)
-
-    def test_f13_02_set_color_endpoints(self):
-        """Verify color switching endpoints."""
-        endpoints = [
-            ("/setPink", "PINK"),
-            ("/setBlue", "BLUE"),
-            ("/setSplotches", "SPLOTCHES"),
-            ("/setOff", "OFF")
+    def test_f13_01_command_mode_opcodes(self):
+        """Verify 1-byte command opcodes for mode transitions."""
+        commands = [
+            (BLE_CMD_SET_PINK, "PINK"),
+            (BLE_CMD_SET_BLUE, "BLUE"),
+            (BLE_CMD_SET_SPLOTCHES, "SPLOTCHES"),
+            (BLE_CMD_SET_OFF, "OFF")
         ]
-        for ep, expected_mode in endpoints:
-            status, data = self.sim.handle_rest_request(ep)
-            self.assertEqual(status, 200)
-            self.assertEqual(data.get("mode"), expected_mode)
+        for opcode, expected_mode in commands:
+            res = self.sim.handle_ble_command(opcode)
+            self.assertEqual(res, "OK")
             self.assertEqual(self.sim.mode, expected_mode)
 
-    def test_f13_03_register_endpoints(self):
-        """Verify wand pairing triggers and cancel endpoints."""
-        status, data = self.sim.handle_rest_request("/register/pink")
-        self.assertEqual(status, 200)
-        self.assertEqual(data.get("pairing"), "PINK")
+    def test_f13_02_command_pairing_opcodes(self):
+        """Verify 1-byte command opcodes for wand pairing triggers and cancellation."""
+        res = self.sim.handle_ble_command(BLE_CMD_PAIR_PINK)
+        self.assertEqual(res, "OK")
+        self.assertEqual(self.sim.pairing_state, "PINK")
 
-        status, data = self.sim.handle_rest_request("/register/cancel")
-        self.assertEqual(status, 200)
-        self.assertEqual(data.get("pairing"), "NONE")
+        res = self.sim.handle_ble_command(BLE_CMD_PAIR_CANCEL)
+        self.assertEqual(res, "OK")
+        self.assertEqual(self.sim.pairing_state, "NONE")
 
-        status, data = self.sim.handle_rest_request("/register/blue")
-        self.assertEqual(status, 200)
-        self.assertEqual(data.get("pairing"), "BLUE")
+        res = self.sim.handle_ble_command(BLE_CMD_PAIR_BLUE)
+        self.assertEqual(res, "OK")
+        self.assertEqual(self.sim.pairing_state, "BLUE")
 
-    def test_f13_04_brightness_endpoint(self):
-        """Verify brightness endpoint adjusts brightness value."""
-        status, data = self.sim.handle_rest_request("/setBrightness", {"val": "120"})
-        self.assertEqual(status, 200)
+    def test_f13_03_brightness_characteristic_control(self):
+        """Verify 1-byte brightness characteristic write updates dress brightness."""
+        res = self.sim.handle_ble_brightness(120)
+        self.assertEqual(res, "OK")
         self.assertEqual(self.sim.brightness, 120)
 
-    def test_f13_05_catch_all_redirect_302(self):
-        """Verify unknown paths return 302 redirect."""
-        status, headers = self.sim.handle_rest_request("/unknown/path")
-        self.assertEqual(status, 302)
-        self.assertEqual(headers.get("Location"), "http://192.168.4.1/")
+    def test_f13_04_unknown_opcode_safety(self):
+        """Verify unknown opcodes (e.g. 0x99) are safely handled and ignored."""
+        res = self.sim.handle_ble_command(0x99)
+        self.assertEqual(res, "UNKNOWN_OPCODE")
+
+    def test_f13_05_ble_state_notification_sync(self):
+        """Verify BLE commands immediately update packed telemetry state."""
+        self.sim.handle_ble_command(BLE_CMD_SET_BLUE)
+        self.sim.handle_ble_brightness(110)
+        raw = self.sim.get_ble_telemetry_bytes()
+        telemetry = unpack_telemetry(raw)
+        self.assertEqual(telemetry["mode"], 2)  # BLUE=2
+        self.assertEqual(telemetry["brightness"], 110)
 
 if __name__ == "__main__":
     unittest.main()

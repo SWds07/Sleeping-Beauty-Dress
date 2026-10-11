@@ -6,16 +6,16 @@
 - **Subsystems & Peripherals**:
   - **LED Subsystem (`LedController`)**: Driven by `makuna/NeoPixelBus @ ^2.8.4` using hardware RMT Channel 0 (`NeoEsp32Rmt0Ws2812xMethod`) on GPIO 4 (100 pixels, Skirt) and hardware RMT Channel 1 (`NeoEsp32Rmt1Ws2812xMethod`) on GPIO 5 (50 pixels, Upper Body & Sleeves). GPIO 6 is permanently disabled due to ESP32-C3 hardware limit of 2 RMT TX channels. Non-blocking hardware DMA/FIFO eliminates interrupt masking.
   - **IR Reception Subsystem (`IRController`)**: Dual 38KHz IR receivers on Left Shoulder (GPIO 3 / D1) and Right Shoulder (GPIO 2 / D0), powered from 3.3V rail. Edge-triggered GPIO interrupts (`attachInterrupt(..., CHANGE)`) with IRAM-safe `esp_timer_get_time()` timestamping and atomic ping-pong double-buffering decode 56-bit MagiQuest packets with zero flash cache panics during NVS writes and zero RMT channel or timer contention.
-  - **Captive Portal Web Subsystem (`WebController`)**: SoftAP `Sleeping-Beauty-Dress` at `192.168.4.1` with port 53 DNS redirection. Serves mobile single-page control app from flash PROGMEM and handles REST endpoints.
+  - **BLE Control Subsystem (`BleController`)**: Bluetooth Low Energy (BLE 5.0) GATT Server advertising as `Aurora-Dress` with Primary Service `19590001-d1e5-4e3b-9a14-c0104d4e5353`. Dispatches live 15-byte telemetry notifications, 1-byte control opcodes, and continuous brightness writes with zero heap overhead and non-blocking execution.
   - **Persistent Storage Subsystem (`StorageController`)**: ESP32 Preferences (NVS) in namespace `auroradress`, storing 32-bit wand IDs (`pink_wand`, `blue_wand`).
-  - **System Coordination (`main.cpp`)**: Deterministic boot sequence (Storage → LED dark init → IR → Web) and non-blocking cooperative round-robin loop.
+  - **System Coordination (`main.cpp`)**: Deterministic boot sequence (Storage → LED dark init → IR → BLE) and non-blocking cooperative round-robin loop.
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
 | 1 | Replace FastLED with NeoPixelBus | Remove FastLED and bit-banging interrupt masking; integrate NeoPixelBus 2.8.4 | M1 | ORIGINAL_REQUEST §R1 |
 | 2 | Phased Pin Architecture (GPIO 4 & 5) | GPIO 4 (100 LEDs, Skirt) via RMT 0; GPIO 5 (50 LEDs, Upper) via RMT 1; disable GPIO 6 | M1 | ORIGINAL_REQUEST §R1 |
-| 3 | Power-On Dark Clamp (Zero White Lockup) | Hardware LOW clamp, internal pull-down, 350µs hold, synchronous blank push before WiFi | M1 | ORIGINAL_REQUEST §R1 |
+| 3 | Power-On Dark Clamp (Zero White Lockup) | Hardware LOW clamp, internal pull-down, 400µs hold, synchronous blank push before BLE | M1 | ORIGINAL_REQUEST §R1 |
 | 4 | Visual Modes | OFF (black), PINK (`#FF1493`), BLUE (`#0078FF`), SPLOTCHES (duel + `#FFFFF0` sparkles), PAIRING_FEEDBACK (breathing) | M1 | ORIGINAL_REQUEST §R1 |
 | 5 | Non-Blocking Throttled Rendering | ~40 FPS animation loop with delta-timing, master brightness scaling, and bus idling | M1 | ORIGINAL_REQUEST §R1 |
 | 6 | 56-bit MagiQuest IR Decoding | Custom pulse-width timing decoder for 56-bit frames (8-bit preamble + 32-bit wand ID + 16-bit magnitude) and 48-bit fallback | M2 | ORIGINAL_REQUEST §R2 |
@@ -23,12 +23,12 @@
 | 8 | IR Event Dispatch | Pink wand -> PINK mode; Blue wand -> BLUE mode; rapid dual wands (within 2s) -> SPLOTCHES | M2 | ORIGINAL_REQUEST §R2 |
 | 9 | Wand Pairing State Machine | 30s auto-timeout pairing mode for Pink or Blue wand with cancellation and visual feedback | M2 | ORIGINAL_REQUEST §R2 |
 | 10 | Zero Resource Contention | Software GPIO interrupt capture with zero RMT or hardware timer collision with LED driver | M2 | ORIGINAL_REQUEST §R2 |
-| 11 | SoftAP & Captive Portal | Open SSID `Sleeping-Beauty-Dress` at 192.168.4.1, DNS captive portal on port 53 with vendor redirects | M3 | ORIGINAL_REQUEST §R3 |
-| 12 | Single-Page Mobile Web UI | Responsive HTML/CSS/JS in PROGMEM showing status, mode buttons, brightness slider, pairing controls | M3 | ORIGINAL_REQUEST §R3 |
-| 13 | REST API Endpoints | `/api/status`, `/setPink`, `/setBlue`, `/setSplotches`, `/setOff`, `/register/pink`, `/register/blue`, `/register/cancel`, `/brightness`, `/setBrightness` | M3 | ORIGINAL_REQUEST §R3 |
+| 11 | BLE GATT Server & Advertising | Advertised name `Aurora-Dress`, primary service `19590001-...`, standard 0x2902 CCCD descriptor | M3 | ORIGINAL_REQUEST §R3 |
+| 12 | Telemetry Characteristic & Binary Protocol | 15-byte Little-Endian packed struct (`19590002-...`) for mode, brightness, pairing, and 32-bit wand IDs | M3 | ORIGINAL_REQUEST §R3 |
+| 13 | BLE Command & Brightness Protocols | 1-byte opcode (`19590003-...`) and brightness byte (`19590004-...`) control protocols | M3 | ORIGINAL_REQUEST §R3 |
 | 14 | Preferences NVS Storage | Store & load paired 32-bit wand IDs in NVS namespace `auroradress` (`pink_wand`, `blue_wand`) | M4 | ORIGINAL_REQUEST §R4 |
-| 15 | Boot Sequencing & Coordination | Storage -> LED dark -> IR -> Web boot sequence, non-blocking round-robin loop in `main.cpp` | M4 | ORIGINAL_REQUEST §R5 |
-| 16 | PlatformIO Clean Build | `platformio.ini` cleanup, remove dead dependencies (`IRremoteESP8266`), verified `pio run` build | M4 | ORIGINAL_REQUEST §R5 |
+| 15 | Boot Sequencing & Coordination | Storage -> LED dark -> IR -> BLE boot sequence, non-blocking round-robin loop in `main.cpp` | M4 | ORIGINAL_REQUEST §R5 |
+| 16 | PlatformIO Clean Build | `platformio.ini` cleanup, remove dead WiFi/AsyncWebServer dependencies, verified `pio run` build | M4 | ORIGINAL_REQUEST §R5 |
 | 17 | 100% E2E Test Suite & Adversarial Hardening | Pass all automated E2E tests (Tiers 1-4) and Tier 5 adversarial coverage hardening | M5 | ORIGINAL_REQUEST Acceptance Criteria |
 
 ## Milestones
@@ -36,7 +36,7 @@
 |---|------|-------|-------------|--------|
 | M1 | LED Subsystem Overhaul (`LedController`) | `platformio.ini`, `Config.h`, `LedController.h`, `LedController.cpp` | none | DONE |
 | M2 | IR Subsystem Refinement (`IRController`) | `IRController.h`, `IRController.cpp`, `Config.h` | M1 | DONE |
-| M3 | Captive Portal & Web UI (`WebController`) | `WebController.h`, `WebController.cpp` | M1 | DONE |
+| M3 | BLE GATT Server Subsystem (`BleController`) | `BleController.h`, `BleController.cpp`, `Config.h` | M1, M2 | DONE |
 | M4 | Storage & System Coordination (`main.cpp`) | `StorageController.h`, `StorageController.cpp`, `main.cpp`, `platformio.ini` | M1, M2, M3 | DONE |
 | M5 | Final Integration, 100% E2E Pass & Hardening | Full system E2E verification (Tiers 1-4) and Tier 5 adversarial stress testing | M4, E2E Test Suite | DONE |
 
@@ -57,9 +57,12 @@
 - `void cancelPairing()`: Exits pairing mode without saving.
 - `PairingState getPairingState()`: Returns active pairing state (`NONE`, `PAIRING_PINK`, `PAIRING_BLUE`).
 
-### `WebController`
-- `void init()`: Sets up SoftAP `Sleeping-Beauty-Dress` (192.168.4.1), starts DNS server on port 53, registers HTTP route handlers and captive portal redirects.
-- `void update()`: Calls `dnsServer.processNextRequest()`.
+### `BleController`
+- `void init()`: Initializes BLE stack, creates GATT server, registers service and characteristics, and starts advertising as `Aurora-Dress`.
+- `void update()`: Non-blocking state delta detection and advertising restart handler.
+- `void notifyStateChanged()`: Packs 15-byte `DressTelemetryPacket` and notifies connected client(s).
+- `bool isConnected()`: Returns true if at least one BLE client is connected.
+- `uint32_t getConnectedDeviceCount()`: Returns count of connected BLE peers.
 
 ### `StorageController`
 - `void init()`: Opens Preferences in namespace `auroradress`, loads stored `pink_wand` and `blue_wand` IDs.
@@ -69,10 +72,10 @@
 - `void saveBlueWandId(uint32_t id)`: Persists Blue wand ID to NVS immediately.
 
 ## Code Layout
-- `platformio.ini`: PlatformIO build configuration, target `seeed_xiao_esp32c3`, libraries: `makuna/NeoPixelBus @ ^2.8.4`, `mathieucarbou/ESPAsyncWebServer`.
-- `include/Config.h`: System pin definitions, LED strip geometry, animation timings, AP and network constants.
+- `platformio.ini`: PlatformIO build configuration, target `seeed_xiao_esp32c3`, libraries: `makuna/NeoPixelBus @ ^2.8.4`.
+- `include/Config.h`: System pin definitions, LED strip geometry, animation timings, BLE GATT UUIDs and opcodes.
 - `include/LedController.h` / `src/LedController.cpp`: NeoPixelBus LED driver, procedural animations, throttled renderer.
 - `include/IRController.h` / `src/IRController.cpp`: Dual-channel software interrupt pulse capture, 56-bit MagiQuest decoder, pairing state machine.
-- `include/WebController.h` / `src/WebController.cpp`: SoftAP, DNS server, PROGMEM web portal, REST API endpoints.
+- `include/BleController.h` / `src/BleController.cpp`: BLE 5.0 GATT server, 15-byte telemetry notifications, command and brightness handlers.
 - `include/StorageController.h` / `src/StorageController.cpp`: Preferences NVS wrapper for wand IDs.
 - `src/main.cpp`: Firmware entrypoint, setup boot sequence, non-blocking polling loop.

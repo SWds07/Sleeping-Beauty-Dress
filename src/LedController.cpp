@@ -67,7 +67,7 @@ void LedController::init() {
     s_stripSkirt.Begin();
     s_stripUpper.Begin();
 
-    // 2. Synchronous dark clear push before WiFi or IR bringup (guarantees zero-white boot)
+    // 2. Synchronous dark clear push before BLE or IR bringup (guarantees zero-white boot)
     s_stripSkirt.ClearTo(COLOR_DARK_BLACK);
     s_stripUpper.ClearTo(COLOR_DARK_BLACK);
     s_stripSkirt.Show();

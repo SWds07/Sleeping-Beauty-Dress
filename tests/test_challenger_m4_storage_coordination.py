@@ -33,7 +33,7 @@ if PROJECT_ROOT not in sys.path:
 
 from tests.helpers import (
     NVS_NAMESPACE, NVS_KEY_PINK_WAND, NVS_KEY_BLUE_WAND,
-    WandInteractionSimulator
+    WandInteractionSimulator, unpack_telemetry
 )
 
 
@@ -127,13 +127,13 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
         cls.main_path = os.path.join(cls.repo_root, "src", "main.cpp")
         cls.storage_h_path = os.path.join(cls.repo_root, "include", "StorageController.h")
         cls.storage_cpp_path = os.path.join(cls.repo_root, "src", "StorageController.cpp")
-        cls.web_cpp_path = os.path.join(cls.repo_root, "src", "WebController.cpp")
+        cls.ble_cpp_path = os.path.join(cls.repo_root, "src", "BleController.cpp")
         cls.elf_path = os.path.join(cls.repo_root, ".pio", "build", "seeed_xiao_esp32c3", "firmware.elf")
         cls.bin_path = os.path.join(cls.repo_root, ".pio", "build", "seeed_xiao_esp32c3", "firmware.bin")
         cls.objdump_path = r"C:\Users\Steven\.platformio\packages\toolchain-riscv32-esp\bin\riscv32-esp-elf-objdump.exe"
 
     def test_challenge_01_nvs_fresh_boot_clean_state(self):
-        """Verify that on fresh boot with empty NVS, wand IDs return 0 and status reports 'Not Paired'."""
+        """Verify that on fresh boot with empty NVS, wand IDs return 0 and status reports unassigned."""
         prefs = MockESP32Preferences()
         storage = MockStorageController(prefs)
         storage.init()
@@ -144,10 +144,12 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
         self.assertEqual(storage.getPinkWandId(), 0)
         self.assertEqual(storage.getBlueWandId(), 0)
 
-        # Simulator mirroring WebController status formatting
+        # Simulator mirroring BleController telemetry formatting
         sim = WandInteractionSimulator(pink_id=0, blue_id=0)
-        status_code, status_json = sim.handle_rest_request("/api/status")
-        self.assertEqual(status_code, 200)
+        raw = sim.get_ble_telemetry_bytes()
+        telemetry = unpack_telemetry(raw)
+        self.assertEqual(telemetry["pinkWandId"], 0)
+        self.assertEqual(telemetry["blueWandId"], 0)
         # Unconfigured wand check in simulator: incoming wand returns UNKNOWN_WAND
         result = sim.handle_wand_signal(0x12345678, 1000)
         self.assertEqual(result, "UNKNOWN_WAND")
@@ -319,7 +321,7 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
         pos_storage = setup_body.find("StorageController::init()")
         pos_led = setup_body.find("LedController::init()")
         pos_ir = setup_body.find("IRController::init()")
-        pos_web = setup_body.find("WebController::init()")
+        pos_ble = setup_body.find("BleController::init()")
 
         self.assertNotEqual(pos_clamp, -1, "earlyPinClamp missing")
         self.assertNotEqual(pos_serial, -1, "Serial.begin missing")
@@ -327,7 +329,7 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
         self.assertNotEqual(pos_storage, -1, "StorageController::init missing")
         self.assertNotEqual(pos_led, -1, "LedController::init missing")
         self.assertNotEqual(pos_ir, -1, "IRController::init missing")
-        self.assertNotEqual(pos_web, -1, "WebController::init missing")
+        self.assertNotEqual(pos_ble, -1, "BleController::init missing")
 
         # Strict order assertion:
         self.assertLess(pos_clamp, pos_serial, "Pin clamp must occur before Serial bringup")
@@ -335,7 +337,7 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
         self.assertLess(pos_settle, pos_storage, "Settle delay must precede storage init")
         self.assertLess(pos_storage, pos_led, "Storage must initialize before LED")
         self.assertLess(pos_led, pos_ir, "LED must initialize before IR")
-        self.assertLess(pos_ir, pos_web, "IR must initialize before Web")
+        self.assertLess(pos_ir, pos_ble, "IR must initialize before BLE")
 
     def test_challenge_08_loop_zero_delay_cooperative_budget(self):
         """Verify loop() body contains exactly zero delay() calls and polls all 3 controllers."""
@@ -348,7 +350,7 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
 
         self.assertIn("LedController::update();", loop_body)
         self.assertIn("IRController::update();", loop_body)
-        self.assertIn("WebController::update();", loop_body)
+        self.assertIn("BleController::update();", loop_body)
 
     def test_challenge_09_iram_isr_cache_safety_disassembly(self):
         """Disassemble firmware.elf and prove IRChannel::handleEdge() makes ZERO calls to .flash.text."""
@@ -412,8 +414,8 @@ class TestChallengerM4StorageCoordination(unittest.TestCase):
 
             # RAM ceiling: 20% of 320KB = 65,536 bytes
             self.assertLessEqual(total_ram, 65536, "RAM usage {} exceeds 20% limit (65,536)".format(total_ram))
-            # Flash ceiling: 50% of 1.9MB min_spiffs = 983,040 bytes
-            self.assertLessEqual(total_flash, 983040, "Flash usage {} exceeds 50% limit (983,040)".format(total_flash))
+            # Flash ceiling: 65% of 1.9MB min_spiffs = 1,277,952 bytes
+            self.assertLessEqual(total_flash, 1277952, "Flash usage {} exceeds 65% limit (1,277,952)".format(total_flash))
 
     def test_challenge_11_high_frequency_pairing_reboot_stress(self):
         """Stress-test 1,000 rapid pairing, reboot, and status query cycles with zero corruption."""

@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, division, absolute_import
 import unittest
-from tests.helpers import MagiQuestDecoder, WandInteractionSimulator
+from tests.helpers import (
+    MagiQuestDecoder, WandInteractionSimulator,
+    BLE_CMD_SET_OFF, BLE_CMD_SET_PINK, BLE_CMD_SET_BLUE, BLE_CMD_SET_SPLOTCHES,
+    LED_MAX_BRIGHTNESS
+)
 
 class TestBoundary17AdversarialStressBoundaries(unittest.TestCase):
     """Tier 2 Boundary: Adversarial stress testing and corruption resistance."""
@@ -16,13 +20,12 @@ class TestBoundary17AdversarialStressBoundaries(unittest.TestCase):
         self.assertIsNone(wand_id)
         self.assertEqual(status, "invalid_bit_period")
 
-    def test_b17_02_rapid_web_endpoint_hammering(self):
-        """Verify handling 20 consecutive HTTP override calls deterministically."""
-        endpoints = ["/setPink", "/setBlue", "/setSplotches", "/setOff"] * 5
-        for ep in endpoints:
-            status, data = self.sim.handle_rest_request(ep)
-            self.assertEqual(status, 200)
-            self.assertEqual(data.get("status"), "ok")
+    def test_b17_02_rapid_ble_command_hammering(self):
+        """Verify handling 20 consecutive BLE opcode override calls deterministically."""
+        commands = [BLE_CMD_SET_PINK, BLE_CMD_SET_BLUE, BLE_CMD_SET_SPLOTCHES, BLE_CMD_SET_OFF] * 5
+        for cmd in commands:
+            res = self.sim.handle_ble_command(cmd)
+            self.assertEqual(res, "OK")
 
     def test_b17_03_pairing_cancellation_during_burst(self):
         """Verify cancelling pairing immediately resets state to NONE."""
@@ -34,11 +37,11 @@ class TestBoundary17AdversarialStressBoundaries(unittest.TestCase):
 
     def test_b17_04_extreme_brightness_values(self):
         """Verify extreme brightness values (-9999 and 99999) are safely clamped."""
-        self.sim.handle_rest_request("/brightness", {"val": "-9999"})
+        self.sim.handle_ble_brightness(-9999)
         self.assertEqual(self.sim.brightness, 0)
 
-        self.sim.handle_rest_request("/brightness", {"val": "99999"})
-        self.assertEqual(self.sim.brightness, 160)
+        self.sim.handle_ble_brightness(99999)
+        self.assertEqual(self.sim.brightness, LED_MAX_BRIGHTNESS)
 
     def test_b17_05_rapid_color_mode_thrashing(self):
         """Verify rapid alternating wand triggers update mode state reliably."""

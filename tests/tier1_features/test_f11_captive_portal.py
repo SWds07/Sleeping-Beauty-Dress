@@ -2,48 +2,32 @@
 from __future__ import print_function, division, absolute_import
 import unittest
 from tests.helpers import (
-    WIFI_AP_SSID, WIFI_AP_IP, DNS_PORT, HTTP_PORT,
-    WandInteractionSimulator
+    BLE_DEVICE_NAME, BLE_SERVICE_UUID, BLE_CHAR_TELEMETRY_UUID,
+    BLE_CHAR_COMMAND_UUID, BLE_CHAR_BRIGHTNESS_UUID, BLE_CCCD_DESCRIPTOR_UUID
 )
 
-class TestFeature11CaptivePortal(unittest.TestCase):
-    """Feature 11: SoftAP & Captive Portal (SSID, DNS 53, OS Probe Redirects)."""
+class TestFeature11BleGattServer(unittest.TestCase):
+    """Feature 11: BLE 5.0 GATT Server & Device Identification (UUID Hierarchy)."""
 
-    def setUp(self):
-        self.sim = WandInteractionSimulator()
+    def test_f11_01_ble_device_name(self):
+        """Verify advertised BLE device name is 'Aurora-Dress'."""
+        self.assertEqual(BLE_DEVICE_NAME, "Aurora-Dress")
 
-    def test_f11_01_softap_ssid(self):
-        """Verify broadcast SoftAP SSID is 'Sleeping-Beauty-Dress'."""
-        self.assertEqual(WIFI_AP_SSID, "Sleeping-Beauty-Dress")
+    def test_f11_02_ble_service_uuid(self):
+        """Verify primary service UUID is 19590001-d1e5-4e3b-9a14-c0104d4e5353."""
+        self.assertEqual(BLE_SERVICE_UUID, "19590001-d1e5-4e3b-9a14-c0104d4e5353")
 
-    def test_f11_02_softap_ip_address(self):
-        """Verify default gateway IP address is 192.168.4.1."""
-        self.assertEqual(WIFI_AP_IP, "192.168.4.1")
+    def test_f11_03_telemetry_char_uuid(self):
+        """Verify telemetry characteristic UUID is 19590002-d1e5-4e3b-9a14-c0104d4e5353."""
+        self.assertEqual(BLE_CHAR_TELEMETRY_UUID, "19590002-d1e5-4e3b-9a14-c0104d4e5353")
 
-    def test_f11_03_dns_port_53(self):
-        """Verify captive portal DNS server runs on UDP port 53."""
-        self.assertEqual(DNS_PORT, 53)
+    def test_f11_04_command_char_uuid(self):
+        """Verify command characteristic UUID is 19590003-d1e5-4e3b-9a14-c0104d4e5353."""
+        self.assertEqual(BLE_CHAR_COMMAND_UUID, "19590003-d1e5-4e3b-9a14-c0104d4e5353")
 
-    def test_f11_04_dns_wildcard_resolution(self):
-        """Verify wildcard DNS resolves any host query to 192.168.4.1."""
-        def resolve_dns(query_host):
-            return WIFI_AP_IP
-        self.assertEqual(resolve_dns("google.com"), "192.168.4.1")
-        self.assertEqual(resolve_dns("apple.com"), "192.168.4.1")
-
-    def test_f11_05_captive_portal_redirects(self):
-        """Verify vendor probe URLs return HTTP 302 to http://192.168.4.1/."""
-        probes = [
-            "/generate_204",
-            "/hotspot-detect.html",
-            "/ncsi.txt",
-            "/connecttest.txt",
-            "/canonical.html"
-        ]
-        for probe in probes:
-            status, headers = self.sim.handle_rest_request(probe)
-            self.assertEqual(status, 302)
-            self.assertEqual(headers.get("Location"), "http://192.168.4.1/")
+    def test_f11_05_brightness_char_uuid(self):
+        """Verify brightness characteristic UUID is 19590004-d1e5-4e3b-9a14-c0104d4e5353."""
+        self.assertEqual(BLE_CHAR_BRIGHTNESS_UUID, "19590004-d1e5-4e3b-9a14-c0104d4e5353")
 
 if __name__ == "__main__":
     unittest.main()

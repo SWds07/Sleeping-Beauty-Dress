@@ -41,7 +41,7 @@ public:
 
     /**
      * @brief Initializes NeoPixelBus hardware RMT drivers on GPIO 4 and GPIO 5,
-     * clears all pixels to dark, and performs synchronous initial show before WiFi bringup.
+     * clears all pixels to dark, and performs synchronous initial show before BLE bringup.
      */
     static void init();
 

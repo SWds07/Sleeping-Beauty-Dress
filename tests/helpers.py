@@ -3,6 +3,7 @@ from __future__ import print_function, division, absolute_import
 import json
 import os
 import re
+import struct
 
 # ============================================================================
 # Constant Definitions (matching Config.h & Technical Specifications)
@@ -45,6 +46,21 @@ WIFI_AP_SSID = "Sleeping-Beauty-Dress"
 WIFI_AP_IP = "192.168.4.1"
 DNS_PORT = 53
 HTTP_PORT = 80
+
+BLE_DEVICE_NAME = "Aurora-Dress"
+BLE_SERVICE_UUID = "19590001-d1e5-4e3b-9a14-c0104d4e5353"
+BLE_CHAR_TELEMETRY_UUID = "19590002-d1e5-4e3b-9a14-c0104d4e5353"
+BLE_CHAR_COMMAND_UUID = "19590003-d1e5-4e3b-9a14-c0104d4e5353"
+BLE_CHAR_BRIGHTNESS_UUID = "19590004-d1e5-4e3b-9a14-c0104d4e5353"
+BLE_CCCD_DESCRIPTOR_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+
+BLE_CMD_SET_OFF = 0x01
+BLE_CMD_SET_PINK = 0x02
+BLE_CMD_SET_BLUE = 0x03
+BLE_CMD_SET_SPLOTCHES = 0x04
+BLE_CMD_PAIR_PINK = 0x10
+BLE_CMD_PAIR_BLUE = 0x11
+BLE_CMD_PAIR_CANCEL = 0x12
 
 NVS_NAMESPACE = "auroradress"
 NVS_KEY_PINK_WAND = "pink_wand"
@@ -291,3 +307,58 @@ class WandInteractionSimulator(object):
         else:
             # 404 catch-all redirects to portal
             return 302, {"Location": "http://192.168.4.1/"}
+
+    def handle_ble_command(self, opcode, now_ms=1000):
+        if opcode == BLE_CMD_SET_OFF:
+            self.mode = "OFF"
+            return "OK"
+        elif opcode == BLE_CMD_SET_PINK:
+            self.mode = "PINK"
+            return "OK"
+        elif opcode == BLE_CMD_SET_BLUE:
+            self.mode = "BLUE"
+            return "OK"
+        elif opcode == BLE_CMD_SET_SPLOTCHES:
+            self.mode = "SPLOTCHES"
+            return "OK"
+        elif opcode == BLE_CMD_PAIR_PINK:
+            self.start_pairing("PINK", now_ms)
+            return "OK"
+        elif opcode == BLE_CMD_PAIR_BLUE:
+            self.start_pairing("BLUE", now_ms)
+            return "OK"
+        elif opcode == BLE_CMD_PAIR_CANCEL:
+            self.cancel_pairing()
+            return "OK"
+        return "UNKNOWN_OPCODE"
+
+    def handle_ble_brightness(self, val):
+        val = min(255, max(0, int(val)))
+        self.brightness = min(LED_MAX_BRIGHTNESS, val)
+        return "OK"
+
+    def get_ble_telemetry_bytes(self):
+        mode_map = {"OFF": 0, "PINK": 1, "BLUE": 2, "SPLOTCHES": 3, "PAIRING_FEEDBACK": 4}
+        pairing_map = {"NONE": 0, "PINK": 1, "BLUE": 2}
+        m = mode_map.get(self.mode, 0)
+        p = pairing_map.get(self.pairing_state, 0)
+        return pack_telemetry(m, self.brightness, p, self.pink_id, self.blue_id, self.last_received_code)
+
+def pack_telemetry(mode_val, brightness, pairing_val, pink_id, blue_id, last_id):
+    """Packs 15-byte little-endian DressTelemetryPacket struct."""
+    return struct.pack("<BBBIII", mode_val, min(255, max(0, brightness)), pairing_val, pink_id, blue_id, last_id)
+
+def unpack_telemetry(data):
+    """Unpacks 15-byte little-endian DressTelemetryPacket struct."""
+    if len(data) < 15:
+        return None
+    mode_val, brightness, pairing_val, pink_id, blue_id, last_id = struct.unpack("<BBBIII", data[:15])
+    return {
+        "mode": mode_val,
+        "brightness": brightness,
+        "pairingState": pairing_val,
+        "pinkWandId": pink_id,
+        "blueWandId": blue_id,
+        "lastWandId": last_id
+    }
+

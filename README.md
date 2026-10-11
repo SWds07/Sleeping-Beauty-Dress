@@ -1,6 +1,6 @@
 # Sleeping-Beauty-Dress
 
-An interactive, color-changing Princess Aurora Halloween dress using an ESP32 microcontroller, WS2812B addressable LEDs, dual-shoulder 38KHz IR receivers, and an embedded captive portal web interface to detect and respond to MagiQuest wands.
+An interactive, color-changing Princess Aurora Halloween dress using an ESP32 microcontroller, WS2812B addressable LEDs, dual-shoulder 38KHz IR receivers, and a Bluetooth Low Energy (BLE 5.0) GATT server communicating with a native Android companion app (`Aurora-Dress-Companion`) to detect and respond to MagiQuest wands.
 
 ---
 
@@ -94,7 +94,7 @@ MagiQuest wands (Creative Kingdoms / Great Wolf Lodge) emit active 38KHz pulse-w
 
 ## 4. Software Controllers Overview
 
-* **`include/Config.h`**: Central definitions for hardware pins, LED counts, brightness limits (1500mA brownout protection cap), animation timing, and soft AP credentials.
+* **`include/Config.h`**: Central definitions for hardware pins, LED counts, brightness limits (1500mA brownout protection cap), animation timing, BLE GATT service/characteristic UUIDs, and command opcodes.
 * **`StorageController`**: Persistent non-volatile storage (NVS via ESP32 `Preferences`) for 32-bit wand IDs (`pinkWandCode` and `blueWandCode`).
 * **`LedController`**: Hardware RMT `NeoPixelBus` driver on GPIO 4 and GPIO 5 with early power-on pin clamp (preventing solid white lockup) and standalone procedural animations (`AnimMath.h`):
   - `PINK`: Solid Princess Aurora Pink (`#FF1493`).
@@ -103,41 +103,61 @@ MagiQuest wands (Creative Kingdoms / Great Wolf Lodge) emit active 38KHz pulse-w
   - `OFF`: Low-power blank state.
   - `PAIRING_FEEDBACK`: Visual breathing pulses.
 * **`IRController`**: Dual-receiver driver on Left/Right shoulders with `IRAM_ATTR` interrupt safety, cache-safe `esp_timer_get_time()`, ping-pong buffering, 3.5ms burst separation, custom 56-bit MagiQuest decoder, and pairing state machine.
-* **`WebController`**: Standalone WiFi Access Point (`"Sleeping-Beauty-Dress"` @ `192.168.4.1`) and DNS captive portal serving an asynchronous mobile web interface on port 80 with REST endpoints.
+* **`BleController`**: Standalone native ESP32 BLE 5.0 GATT server (`Aurora-Dress`, Service `19590001-d1e5-4e3b-9a14-c0104d4e5353`). Manages a 15-byte Little-Endian packed binary telemetry characteristic with NOTIFY/READ (`19590002-...`), 1-byte command input with WRITE/WRITE_NO_RESPONSE (`19590003-...`), and master brightness control (`19590004-...`), with non-blocking cooperative advertising recovery.
 
 ---
 
-## 5. Web Portal & Wand Pairing Guide
+## 5. Android Companion App & Wand Pairing Guide
 
 1. Power the dress via a 5V battery bank.
-2. On your phone, connect to the WiFi network **`Sleeping-Beauty-Dress`** (no password required).
-3. The captive portal will open automatically (or navigate to `http://192.168.4.1/` in any browser).
+2. Launch the **Aurora Dress Companion** app on your Android smartphone (BLE 5.0 enabled).
+3. The app automatically scans for and connects to the **`Aurora-Dress`** BLE peripheral advertising the Aurora Primary Service UUID (`19590001-d1e5-4e3b-9a14-c0104d4e5353`).
 4. **Pairing a Wand**:
-   - Tap **"Register Pink Wand"** (banner will flash "PAIRING ACTIVE: Flick PINK Wand now!").
-   - Wave/flick the wand near either shoulder.
-   - The dress flashes pink 3 times to confirm pairing, and saves the 32-bit ID permanently to flash.
-   - Repeat for **"Register Blue Wand"**.
+   - Tap **"Pair Pink Wand"** in the companion app (sends opcode `0x10`). The dress enters a 30-second pairing window and telemetry reports `PAIRING_PINK`.
+   - Flick the Pink Wand near either shoulder.
+   - The dress flashes pink 3 times to confirm pairing, permanently saves the 32-bit ID to NVS flash (`pink_wand`), and resumes normal operation.
+   - Repeat for **"Pair Blue Wand"** (sends opcode `0x11`).
+   - Tap **"Cancel Pairing"** (sends opcode `0x12`) if needed to abort pairing before timeout.
 5. **Dueling Spell (Splotches)**:
    - Flick the Pink Wand, then flick the Blue Wand within 2.0 seconds. The dress automatically shifts into the animated "Dueling Splotches" mode.
-6. **Manual Overrides**:
-   - Use the web interface buttons (Pink, Blue, Splotches, Off, and Brightness Slider) for immediate manual control.
+6. **Manual Lighting & Brightness Controls**:
+   - Use the companion app buttons for immediate lighting overrides: Pink (`0x02`), Blue (`0x03`), Splotches (`0x04`), or Off (`0x01`).
+   - Adjust the brightness slider in the app (writes directly to characteristic `19590004-...` with values `0`–`255`).
 
-### REST API Reference
+### BLE GATT Architecture & Protocol Reference
 
-The asynchronous web server exposes the following zero-heap HTTP GET endpoints:
+The native ESP32 BLE GATT server exposes the following service and characteristics:
 
-| Endpoint | Method | Response | Description |
+| UUID | Characteristic | Properties | Description |
 |---|---|---|---|
-| `/` | `GET` | `text/html` | Serves the single-page responsive control app stored in `PROGMEM` |
-| `/api/status` | `GET` | `application/json` | Returns live status: `{"mode":"...","pinkWand":"...","blueWand":"...","pairing":"...","brightness":...}` |
-| `/setPink` | `GET` | `application/json` | Overrides lighting to Princess Aurora Deep Pink (`#FF1493`) |
-| `/setBlue` | `GET` | `application/json` | Overrides lighting to Merryweather Royal Blue (`#0078FF`) |
-| `/setSplotches`| `GET` | `application/json` | Overrides lighting to dynamic dueling Splotches animation with fairy dust |
-| `/setOff` | `GET` | `application/json` | Turns off all LEDs (`#000000`) |
-| `/register/pink`| `GET` | `application/json` | Enters 30-second pairing window for the Pink Wand |
-| `/register/blue`| `GET` | `application/json` | Enters 30-second pairing window for the Blue Wand |
-| `/register/cancel`| `GET` | `application/json`| Cancels active wand pairing window |
-| `/setBrightness?val=<0-255>`| `GET`| `application/json`| Adjusts master LED brightness (also available at `/brightness`) |
+| `19590001-d1e5-4e3b-9a14-c0104d4e5353` | Primary Service | N/A | Aurora Dress Primary BLE Service |
+| `19590002-d1e5-4e3b-9a14-c0104d4e5353` | Live Telemetry | `READ`, `NOTIFY` | 15-byte little-endian binary telemetry struct |
+| `19590003-d1e5-4e3b-9a14-c0104d4e5353` | Command Input | `WRITE`, `WRITE_NO_RESP` | 1-byte control opcode |
+| `19590004-d1e5-4e3b-9a14-c0104d4e5353` | Brightness Control | `READ`, `WRITE`, `WRITE_NO_RESP` | 1-byte brightness value (`0`–`255`) |
+| `00002902-0000-1000-8000-00805f9b34fb` | CCCD Descriptor | `READ`, `WRITE` | Client Characteristic Configuration Descriptor for Telemetry |
+
+#### Live Telemetry Packet (15 Bytes, Little-Endian)
+
+| Byte Offset | Field | Data Type | Valid Values & Encoding |
+|---|---|---|---|
+| `[0]` | Mode | `uint8_t` | `0x00`: OFF, `0x01`: PINK, `0x02`: BLUE, `0x03`: SPLOTCHES, `0x04`: PAIRING_FEEDBACK |
+| `[1]` | Brightness | `uint8_t` | Master brightness level (`0` to `255`) |
+| `[2]` | Pairing State | `uint8_t` | `0x00`: NONE / IDLE, `0x01`: PAIR_PINK, `0x02`: PAIR_BLUE |
+| `[3..6]` | Pink Wand ID | `uint32_t` | 32-bit paired Pink Wand code (little-endian; `0x00000000` if unassigned) |
+| `[7..10]` | Blue Wand ID | `uint32_t` | 32-bit paired Blue Wand code (little-endian; `0x00000000` if unassigned) |
+| `[11..14]` | Last Wand ID | `uint32_t` | Most recently detected 32-bit IR wand code (little-endian) |
+
+#### Command Opcodes (1 Byte)
+
+| Opcode | Command | Effect |
+|---|---|---|
+| `0x01` | `CMD_SET_OFF` | Turn off all LEDs (`#000000`) |
+| `0x02` | `CMD_SET_PINK` | Override lighting to Princess Aurora Deep Pink (`#FF1493`) |
+| `0x03` | `CMD_SET_BLUE` | Override lighting to Merryweather Royal Blue (`#0078FF`) |
+| `0x04` | `CMD_SET_SPLOTCHES` | Override lighting to dynamic dueling Splotches animation |
+| `0x10` | `CMD_PAIR_PINK` | Initiate 30-second pairing window for Pink Wand |
+| `0x11` | `CMD_PAIR_BLUE` | Initiate 30-second pairing window for Blue Wand |
+| `0x12` | `CMD_PAIR_CANCEL` | Abort active pairing window immediately |
 
 ---
 
@@ -157,8 +177,8 @@ pio device monitor -b 115200
 ```
 
 ### Memory Footprint
-* **RAM**: 12.8% (41,876 / 327,680 bytes)
-* **Flash**: 42.4% (833,426 / 1,966,080 bytes)
+* **RAM**: 12.5% (41,028 / 327,680 bytes)
+* **Flash**: 51.0% (1,003,444 / 1,966,080 bytes)
 
 ---
 
@@ -181,8 +201,9 @@ python tests/run_tests.py
 
 ## 8. Bluetooth Low Energy & Android Companion Architecture
 
-For environments where WiFi captive portals are inconvenient, the repository defines a dedicated Bluetooth Low Energy (BLE 5.0) GATT profile specification to support a native Android companion app.
+The firmware utilizes a native ESP32 BLE 5.0 GATT peripheral architecture paired with the `Aurora-Dress-Companion` Android application:
 
-* Specification Document: [`docs/BLUETOOTH_SPECIFICATION.md`](docs/BLUETOOTH_SPECIFICATION.md)
-* Includes complete GATT service hierarchy (`19590001-...`), packed binary telemetry structs, 1-byte command opcodes, and prompt requirements for generating the native Kotlin / Jetpack Compose Android client in a separate repository.
+* **Companion App**: Native Android app built with Kotlin, Jetpack Compose, and Android BLE APIs. Discovers `Aurora-Dress`, receives live telemetry notifications, and sends command opcodes and brightness updates.
+* **Specification Document**: Full binary protocol and GATT hierarchy defined in [`docs/BLUETOOTH_SPECIFICATION.md`](docs/BLUETOOTH_SPECIFICATION.md).
+* **Zero Frame Drops**: BleController executes cooperative non-blocking updates in `loop()`, using non-blocking timers for advertising restart upon client disconnect without delaying NeoPixelBus RMT rendering or missing IR receiver interrupts.
 

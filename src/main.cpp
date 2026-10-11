@@ -3,7 +3,7 @@
 #include "StorageController.h"
 #include "LedController.h"
 #include "IRController.h"
-#include "WebController.h"
+#include "BleController.h"
 
 void setup() {
     // 0. Hardware Pin Clamp to guarantee dark boot and suppress floating gate latch
@@ -30,9 +30,9 @@ void setup() {
     IRController::init();
     Serial.println(F("[Main] IRController initialized"));
 
-    // 4. Initialize WiFi SoftAP, captive portal DNS, and async web server
-    WebController::init();
-    Serial.println(F("[Main] WebController initialized"));
+    // 4. Initialize BLE 5.0 GATT server & advertising
+    BleController::init();
+    Serial.println(F("[Main] BleController initialized (GATT Server: Aurora-Dress)"));
 
     Serial.println(F("=================================================="));
     Serial.println(F("         Firmware initialization complete!        "));
@@ -43,6 +43,6 @@ void loop() {
     // Non-blocking round-robin polling across all subsystems
     LedController::update();
     IRController::update();
-    WebController::update();
+    BleController::update();
 }
 
